@@ -95,10 +95,6 @@ function pageSource(meta, getUrl = () => meta.url, parse = parseTables) {
   };
 }
 
-function beijingDay(now = Date.now()) {
-  return new Date(now + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
-
 function ed28Rows(html) {
   return [...html.matchAll(/\bdata-draw-result-bar\s+data-period="(\d{7})"[^>]*>[\s\S]*?\bdata-drb-a[^>]*>\s*(\d)\s*<\/span>[\s\S]*?\bdata-drb-b[^>]*>\s*(\d)\s*<\/span>[\s\S]*?\bdata-drb-c[^>]*>\s*(\d)\s*<\/span>/gi)]
     .map((row) => createRow(row[1], row.slice(2, 5)));
@@ -150,11 +146,16 @@ export const sources = [
   pageSource({ id: 'feiji28', name: '飞机28', group: '飞机28', url: 'https://www.feiji28.com/' }),
   pageSource({ id: 'canpc28', name: 'CANPC28', group: 'CANPC28', url: 'https://canpc28.net/' }),
   pageSource({ id: '711', name: '711开奖', group: '711开奖', url: 'https://711kc.com/lottery/CA28?panel=history' }),
-  pageSource({ id: 'boyi', name: '博易', group: '博易', url: 'https://www.byw.bet/lottery/canada-pc28.html' }, undefined,
-    (html) => parseTables(html, { timeKind: 'observed' })),
+  {
+    id: 'boyi', name: '博易', kind: 'third_party', group: '博易', url: 'https://www.byw.bet/lottery/canada-pc28.html',
+    async fetchRows() { throw new Error('公开页面使用图片显示三球，暂无文本数据接入'); },
+  },
   pageSource({ id: 'ed28', name: 'ED28', group: 'ED28', url: 'https://ed28.cn/' }, undefined, ed28Rows),
-  pageSource({ id: 'jnd28-best', name: 'JND28.best', group: 'JND28.best', url: 'https://jnd28.best/' },
-    () => `https://jnd28.best/pc28/day/${beijingDay()}`),
+  jsonSource({ id: 'jnd28-best', name: 'JND28.best', group: 'JND28.best', url: 'https://jnd28.best/' },
+    'https://jnd28.best/internal/draw-status', (data) => {
+      const row = data.data?.latest;
+      return row ? [createRow(row.nbr, row.number, row.keno, reportedTime(row.draw_time))] : [];
+    }),
   pageSource({ id: 'kpay', name: 'KPAY', group: 'KPAY', url: 'https://www.pc28.work/' }),
   pageSource({ id: 'pc28pc', name: 'PC28PC', group: 'PC2868', url: 'https://pc28pc.net/live/' }),
   jsonSource({ id: 'zhanshen', name: '战神28', group: 'PC2868', url: 'https://pc6628.com/' },
