@@ -252,7 +252,8 @@ export function openStore(path, sources) {
     const corrected = clock && (clock.offsetSeconds === null || Math.abs(clock.offsetSeconds) > clockAgreementMs / 1000);
     return {
       status: corrected ? 'corrected' : clock ? 'verified' : 'unverified',
-      drawId: current?.draw_id ?? null, referenceAt: timestamps(current?.draw_at), reportedAt: clock?.reportedAt ?? null,
+      drawId: current?.draw_id ?? null, referenceAt: clock ? timestamps(current.draw_at) : null,
+      reportedAt: clock ? clock.reportedAt : timestamps(current?.draw_at),
       checkedAt: clock?.checkedAt ?? null, offsetSeconds: clock?.offsetSeconds ?? null,
     };
   }

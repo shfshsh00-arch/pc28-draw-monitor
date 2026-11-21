@@ -191,6 +191,8 @@ test('keeps missing and late results out of the anomaly list and waits for verif
     drawAt: toIso(timestamp - 3600000), timeKind: 'draw' }])], timestamp + 250000);
   const snapshot = store.dashboard(timestamp + 250000);
   assert.equal(snapshot.referenceClock.status, 'unverified');
+  assert.equal(snapshot.referenceClock.referenceAt, null);
+  assert.equal(snapshot.referenceClock.reportedAt, toIso(timestamp));
   assert.equal(snapshot.draws[0].matched, 1);
   assert.equal(snapshot.draws[0].anomalyCount, 0);
   assert.deepEqual(snapshot.timing, []);

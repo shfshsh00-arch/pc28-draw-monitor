@@ -191,7 +191,7 @@ function renderTiming() {
   const latest = draws.find(draw => draw.officialNumbers);
   setText('timing-reference-draw', clock?.drawId ?? official?.latestDrawId ?? latest?.drawId ?? emptyValue);
   setText('timing-reference-at', displayTime(clock?.referenceAt));
-  setText('timing-reference-reported', displayTime(clock?.reportedAt || official?.latestDrawAt || latest?.officialAt));
+  setText('timing-reference-reported', displayTime(clock ? clock.reportedAt : official?.latestDrawAt ?? latest?.officialAt));
   setText('timing-reference-checked', displayTime(clock?.checkedAt));
   const clockStates = { verified: ['已核验', 'ok'], corrected: ['基准已校正', 'info'], unverified: ['待核验', 'pending'] };
   const [clockLabel, clockColor] = clockStates[clock?.status] || clockStates.unverified;
@@ -200,7 +200,10 @@ function renderTiming() {
   clockBadge.className = 'badge badge-' + clockColor;
   const clockNote = byId('timing-reference-note');
   clockNote.hidden = clock?.status !== 'corrected';
-  if (!clockNote.hidden) clockNote.textContent = 'BCLC 标注比核验基准 ' + clockDifference(clock.offsetSeconds);
+  if (!clockNote.hidden) {
+    clockNote.textContent = Number.isFinite(clock.offsetSeconds) ? 'BCLC 标注比核验基准 ' + clockDifference(clock.offsetSeconds)
+      : '基准时间依据 BCLC 实时开奖已过时长核验。';
+  }
 
   const open = timing.filter(issue => issue.status === 'open').length;
   setText('timing-count-label', open + ' 条待核查 · ' + (timing.length - open) + ' 条已恢复');
@@ -222,7 +225,7 @@ function renderTiming() {
   const thirdParties = sources.filter(source => source.kind !== 'official');
   byId('timing-source-rows').innerHTML = thirdParties.map(source => {
     const result = latestBySource.get(source.id);
-    const state = result?.status === 'aligned' ? badge('时间一致', 'ok') : result?.status === 'offset'
+    const state = result?.status === 'aligned' ? badge(result.offsetSeconds === 0 ? '时间一致' : '容差内', 'ok') : result?.status === 'offset'
       ? badge('存在偏差', 'info') : badge('待比对', 'pending');
     return '<tr><td>' + escapeText(source.name) + '</td><td>' + drawButton(result?.drawId) +
       '</td><td class="date-cell">' + timeMarkup(result?.officialAt) + '</td><td class="date-cell">' + timeMarkup(result?.sourceAt) +
