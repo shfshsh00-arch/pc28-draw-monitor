@@ -10,7 +10,7 @@ const anomalyLabels = {
   late_source: ['来源延迟', 'warning'],
   missing_result: ['来源缺期', 'error'],
 };
-const sourceLabels = { ok: ['在线', 'ok'], error: ['采集异常', 'error'], pending: ['等待采集', 'pending'] };
+const sourceLabels = { ok: ['在线', 'ok'], error: ['采集异常', 'error'], stale: ['数据过期', 'warning'], pending: ['等待采集', 'pending'] };
 const viewLabels = { overview: '监控总览', anomalies: '异常记录', sources: '数据源' };
 const timeLabels = { draw: '开奖时间', clock: '来源仅提供时分', observed: '记录时间', uncertain: '时间口径待确认' };
 const pageSize = 12;
@@ -151,8 +151,9 @@ function renderAnomalies() {
 
 function renderSources() {
   const sources = dashboard.sources;
+  const statusOrder = { error: 1, stale: 2, pending: 3, ok: 4 };
   const previewOrder = [...sources].sort((a, b) => {
-    const weight = source => source.kind === 'official' ? 0 : source.status === 'error' ? 1 : source.status === 'pending' ? 2 : 3;
+    const weight = source => source.kind === 'official' ? 0 : (statusOrder[source.status] ?? 3);
     return weight(a) - weight(b);
   });
   byId('source-preview').innerHTML = previewOrder.slice(0, 7).map(source => {
@@ -172,10 +173,12 @@ function renderSources() {
     const title = url ? '<a class="source-name" href="' + escapeText(url) + '" target="_blank" rel="noopener noreferrer">' +
       escapeText(source.name) + '</a>' : '<span class="source-name">' + escapeText(source.name) + '</span>';
     const group = source.kind === 'official' ? '官方基准' : (source.group || '第三方');
+    const problem = source.status === 'error' ? (source.lastError || '采集请求失败') :
+      source.status === 'stale' ? '接口有响应，暂无近 24 小时内的有效开奖' : emptyValue;
     return '<tr><td>' + title + '<span class="section-label">' + escapeText(group) + '</span></td><td>' +
       badge(label, color) + '</td><td>' + (source.latestDrawId ? drawButton(source.latestDrawId) : emptyValue) +
       '</td><td class="date-cell">' + timeMarkup(source.lastOkAt) + '</td><td class="source-error">' +
-      escapeText(source.status === 'error' ? (source.lastError || '采集请求失败') : emptyValue) + '</td></tr>';
+      escapeText(problem) + '</td></tr>';
   }).join('');
   setEmpty('source-empty', !sources.length, '暂无配置的数据源');
 }
@@ -184,6 +187,8 @@ function renderDashboard() {
   const { sources, anomalies, draws } = dashboard;
   const online = sources.filter(source => source.status === 'ok').length;
   const offline = sources.filter(source => source.status === 'error').length;
+  const stale = sources.filter(source => source.status === 'stale').length;
+  const pending = sources.filter(source => source.status === 'pending').length;
   const open = anomalies.filter(issue => issue.status === 'open').length;
   const official = sources.find(source => source.kind === 'official');
   const reference = draws.find(draw => draw.officialNumbers);
@@ -194,22 +199,22 @@ function renderDashboard() {
   setText('reference-time', displayTime(referenceMatch?.officialAt || official?.latestDrawAt));
   byId('reference-numbers').innerHTML = numbersMarkup(referenceMatch?.officialNumbers, '等待官方数据');
   setText('metric-sources', online + ' / ' + sources.length);
-  const pending = sources.length - online - offline;
-  setText('metric-source-detail', offline || pending ? [offline ? offline + ' 个采集异常' : '', pending ? pending + ' 个尚未完成首次采集' : ''].filter(Boolean).join(' · ') : (sources.length ? '暂无采集异常' : '等待配置数据源'));
+  const problems = [offline && offline + ' 个采集异常', stale && stale + ' 个数据过期', pending && pending + ' 个等待采集'].filter(Boolean);
+  setText('metric-source-detail', problems.join(' · ') || (sources.length ? '暂无采集异常' : '等待配置数据源'));
   setText('metric-draws', draws.length);
   setText('retention-copy', '最近 ' + (dashboard.retentionHours || 24) + ' 小时');
   setText('metric-alerts', open);
   byId('metric-alerts').classList.toggle('has-alerts', open > 0);
   setText('nav-anomaly-count', open);
   byId('nav-anomaly-count').hidden = open === 0;
-  const state = offline ? 'error' : online ? 'ok' : 'pending';
+  const state = offline ? 'error' : stale ? 'warning' : online ? 'ok' : 'pending';
   byId('sidebar-dot').className = 'status-dot status-' + state;
-  setText('sidebar-status', offline ? '部分来源采集异常' : online ? '采集服务运行中' : '等待首次采集');
+  setText('sidebar-status', offline || stale ? '部分来源采集异常' : online ? '采集服务运行中' : '等待首次采集');
   setText('sidebar-cadence', '采集间隔 ' + (dashboard.pollIntervalSeconds || 30) + ' 秒');
   const notice = byId('notice');
   if (!official || official.status !== 'ok') {
     notice.hidden = false;
-    notice.textContent = official?.status === 'error'
+    notice.textContent = official?.status === 'stale' ? 'BCLC 官方源尚未返回近 24 小时内的开奖。' : official?.status === 'error'
       ? 'BCLC 官方源最近一次采集失败。已有记录仍可查看，尚未取得官方号码的期次会保留为待对账。'
       : '正在等待 BCLC 官方基准。';
   } else {

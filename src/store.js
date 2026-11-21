@@ -95,8 +95,11 @@ export function openStore(path, sources, options = {}) {
       precision_ms=excluded.precision_ms, last_seen_at=excluded.last_seen_at`);
   const refreshOk = db.prepare(`UPDATE sources SET status='ok', first_ok_at=COALESCE(first_ok_at, ?), last_ok_at=?, last_error=NULL,
     latest_draw_id=?, latest_draw_at=? WHERE id=?`);
+  const refreshStale = db.prepare(`UPDATE sources SET status='stale', last_ok_at=?, last_error=NULL,
+    latest_draw_id=NULL, latest_draw_at=NULL WHERE id=?`);
   const refreshError = db.prepare(`UPDATE sources SET status='error', last_error_at=?, last_error=? WHERE id=?`);
-  const latestObservation = db.prepare('SELECT draw_id, draw_at FROM observations WHERE source_id=? ORDER BY draw_id DESC LIMIT 1');
+  const latestObservation = db.prepare(`SELECT o.draw_id, o.draw_at FROM observations o JOIN draws d ON d.id=o.draw_id
+    WHERE o.source_id=? AND d.retention_at>? ORDER BY o.draw_id DESC LIMIT 1`);
   const observationAt = db.prepare('SELECT * FROM observations WHERE draw_id=? AND source_id=?');
   const rowsForDraw = db.prepare(`SELECT observations.*, sources.name, sources.kind FROM observations
     JOIN sources ON sources.id = observations.source_id WHERE draw_id=? ORDER BY (kind='official') DESC, sources.rowid`);
@@ -230,8 +233,9 @@ export function openStore(path, sources, options = {}) {
         if (valid === 0) {
           refreshError.run(now, '数据源没有返回可验证的开奖记录。', source.id);
         } else {
-          const latest = latestObservation.get(source.id);
-          refreshOk.run(seenAt, seenAt, latest?.draw_id ?? null, latest?.draw_at ?? null, source.id);
+          const latest = latestObservation.get(source.id, cutoff);
+          if (latest) refreshOk.run(seenAt, seenAt, latest.draw_id, latest.draw_at, source.id);
+          else refreshStale.run(seenAt, source.id);
         }
       }
       markRetired.run(retired);

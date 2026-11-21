@@ -81,6 +81,9 @@ test('prunes observations and flags at 24 hours and ignores an old replay', t =>
   assert.equal(store.drawDetails(123, expired), null);
   assert.equal(store.dashboard(expired).anomalies.length, 0);
   assert.ok(store.dashboard(expired).sources.every(row => row.latestDrawId === null));
+  assert.ok(store.dashboard(expired).sources.every(row => row.status === 'stale'));
   store.record([report(source, expired + 1, [{ drawId: 123, numbers: [1, 2, 3] }])], expired + 1);
   assert.equal(store.drawDetails(123, expired + 1), null);
+  store.record([report(source, expired + 2, [{ drawId: 124, numbers: [2, 1, 2], drawAt: toIso(expired + 2) }])], expired + 2);
+  assert.equal(store.dashboard(expired + 2).sources.find(row => row.id === source.id).status, 'ok');
 });
