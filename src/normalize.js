@@ -2,6 +2,7 @@ const LOCAL_TIME = /^(\d{4})[-/](\d{2})[-/](\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})
 const ENGLISH_TIME = /^([A-Za-z]{3}) (\d{1,2}), (\d{4}) (\d{1,2}):(\d{2}):(\d{2}) (AM|PM)$/i;
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 const DAY = 86_400_000;
 
 export function parseRawNumbers(value) {
@@ -72,7 +73,7 @@ export function officialTime(value) {
   const { utc, year, month, day, hour, precisionMs } = local;
   const spring = sunday(year, 3, 2);
   const autumn = sunday(year, 11, 1);
-  const skippedHour = month === 3 && day === spring && hour === 2;
+  const skippedHour = year <= 2026 && month === 3 && day === spring && hour === 2;
   const repeatedHour = year < 2026 && month === 11 && day === autumn && hour === 1;
   if (skippedHour || repeatedHour) return { timeLabel, timeKind: 'uncertain' };
 
@@ -82,6 +83,51 @@ export function officialTime(value) {
     (month < 11 || (month === 11 && (day < autumn || (day === autumn && hour < 2))));
   const offsetHours = permanentPacific || historicalSummer ? 7 : 8;
   return { drawAt: new Date(utc + offsetHours * 60 * MINUTE).toISOString(), timeLabel, timeKind: 'draw', precisionMs };
+}
+
+export function calibrateOfficialClock({ requestStartedAt, responseReceivedAt, serverDate, age,
+  elapsedMs, liveTime, archiveTime, observedArchive = archiveTime !== undefined }) {
+  const origin = Date.parse(serverDate ?? '');
+  if (!Number.isFinite(origin) || !Number.isFinite(requestStartedAt) || !Number.isFinite(responseReceivedAt) ||
+      responseReceivedAt < requestStartedAt || responseReceivedAt - requestStartedAt > 15_000 ||
+      origin < requestStartedAt - 5000 || origin > responseReceivedAt + 5000 ||
+      (age != null && String(age).trim() !== '0') ||
+      !Number.isFinite(elapsedMs) || elapsedMs < 0 || elapsedMs > 215_000) return undefined;
+
+  const live = officialTime(liveTime);
+  const archive = officialTime(archiveTime);
+  const candidates = [live, archive].map((entry) => ({ entry, epoch: Date.parse(entry.drawAt ?? '') }))
+    .filter((entry) => Number.isFinite(entry.epoch));
+  const elapsedEstimate = origin - elapsedMs;
+  const fitted = candidates.map(({ epoch }) => {
+    const hours = Math.round((epoch - elapsedEstimate) / HOUR);
+    return { hours, epoch: epoch - hours * HOUR };
+  }).filter(({ hours, epoch }) => Math.abs(hours) <= 2 && Math.abs(epoch - elapsedEstimate) <= 4000)
+    .sort((a, b) => Math.abs(a.hours) - Math.abs(b.hours));
+
+  let canonical = fitted[0]?.epoch;
+  if (canonical === undefined && candidates.length === 0) {
+    // The server Date header only has second precision. Use a nearby Keno slot when the wall times are unusable.
+    const slot = Math.round(elapsedEstimate / 30_000) * 30_000;
+    if (Math.abs(slot - elapsedEstimate) <= 4000) canonical = slot;
+  }
+  if (canonical === undefined) return undefined;
+
+  const archiveAt = Date.parse(archive.drawAt ?? '');
+  const liveAt = Date.parse(live.drawAt ?? '');
+  const offsetArchive = Number.isFinite(archiveAt) && Math.abs(archiveAt - canonical) > 8000;
+  const offsetLive = Number.isFinite(liveAt) && Math.abs(liveAt - canonical) > 8000;
+  const reported = offsetArchive ? archive : offsetLive ? live : archive.drawAt ? archive : live;
+  const reportedAt = reported.drawAt ?? null;
+  return {
+    drawAt: new Date(canonical).toISOString(), timeKind: 'draw', precisionMs: 1000,
+    timeLabel: reported.timeLabel ?? live.timeLabel ?? archive.timeLabel,
+    clock: {
+      checkedAt: new Date(responseReceivedAt).toISOString(), reportedAt,
+      offsetSeconds: reportedAt === null ? null : Math.round((Date.parse(reportedAt) - canonical) / 1000),
+      observedArchive,
+    },
+  };
 }
 
 export function reportedTime(value, { kind = 'draw', now = Date.now() } = {}) {

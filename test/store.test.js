@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { deriveNumbers, openStore } from '../src/store.js';
+import { calibrateOfficialClock, officialTime } from '../src/normalize.js';
 
 const official = { id: 'bclc', name: 'BCLC', kind: 'official', url: 'https://example.com/bclc' };
 const source = { id: 'peer', name: 'Peer', kind: 'third_party', url: 'https://example.com/peer' };
@@ -12,6 +13,10 @@ const raw = [1, 4, 5, 11, 14, 32, 36, 38, 39, 41, 43, 44, 45, 57, 58, 62, 66, 73
 const timestamp = Date.parse('2026-11-21T10:00:00Z');
 const toIso = value => new Date(value).toISOString();
 const report = (feed, now, rows) => ({ sourceId: feed.id, seenAt: now, rows });
+const checked = (drawId, at = timestamp, reported = at) => ({
+  drawId, raw, drawAt: toIso(at), timeKind: 'draw', precisionMs: 1000,
+  clock: { checkedAt: toIso(at), reportedAt: toIso(reported), offsetSeconds: (reported - at) / 1000, observedArchive: true },
+});
 
 test('derives the reference from 20 unique Keno balls', () => {
   assert.deepEqual(deriveNumbers(raw.toReversed()), [2, 1, 2]);
@@ -22,13 +27,15 @@ test('flags data and timestamp differences separately, then records recovery', t
   const store = openStore(':memory:', [official, source]);
   t.after(() => store.close());
   store.record([
-    report(official, timestamp, [{ drawId: 123, raw, drawAt: toIso(timestamp), timeKind: 'draw' }]),
+    report(official, timestamp, [checked(123)]),
     report(source, timestamp, [{ drawId: 123, numbers: [9, 8, 1], drawAt: toIso(timestamp + 3600000), timeKind: 'draw' }]),
   ], timestamp);
-  assert.deepEqual(store.dashboard(timestamp).anomalies.map(row => row.type).sort(), ['numbers_mismatch', 'time_mismatch']);
+  assert.deepEqual(store.dashboard(timestamp).anomalies.map(row => row.type), ['numbers_mismatch']);
+  assert.deepEqual(store.dashboard(timestamp).timing.map(row => row.type), ['source_clock']);
   store.record([report(source, timestamp + 1000, [{ drawId: 123, numbers: [2, 1, 2], drawAt: toIso(timestamp), timeKind: 'draw' }])], timestamp + 1000);
   assert.equal(store.dashboard(timestamp + 1000).draws[0].matched, 1);
   assert.ok(store.drawDetails(123, timestamp + 1000).anomalies.every(row => row.status === 'resolved'));
+  assert.equal(store.drawDetails(123, timestamp + 1000).timing[0].status, 'resolved');
   const issue = store.drawDetails(123, timestamp + 1000).anomalies.find(row => row.type === 'numbers_mismatch');
   assert.deepEqual(issue.officialNumbers, [2, 1, 2]);
   assert.deepEqual(issue.sourceNumbers, [9, 8, 1]);
@@ -105,11 +112,17 @@ test('loads existing anomaly records when opening a database from before raw sna
   ], timestamp);
   original.close();
   const legacy = new DatabaseSync(path);
-  legacy.exec('ALTER TABLE anomalies DROP COLUMN evidence');
+  legacy.exec(`ALTER TABLE anomalies DROP COLUMN evidence;
+    ALTER TABLE observations DROP COLUMN clock;
+    INSERT INTO anomalies SELECT draw_id, source_id, 'missing_result', status, first_seen_at, last_seen_at,
+      detail, official_numbers, source_numbers, official_at, source_at FROM anomalies WHERE type='numbers_mismatch';`);
   legacy.close();
   const reopened = openStore(path, [official, source]);
   try {
-    const [issue] = reopened.drawDetails(123, timestamp).anomalies;
+    const detail = reopened.drawDetails(123, timestamp);
+    assert.equal(detail.anomalies.length, 1);
+    assert.deepEqual(detail.timing, []);
+    const [issue] = detail.anomalies;
     assert.deepEqual(issue.sourceNumbers, [9, 8, 1]);
     assert.equal(issue.evidence, null);
   } finally {
@@ -117,44 +130,86 @@ test('loads existing anomaly records when opening a database from before raw sna
   }
 });
 
-test('reports a backward BCLC clock separately from a third-party clock', t => {
+test('uses the checked BCLC clock and keeps the validated time after subsequent archive reads', t => {
   const store = openStore(':memory:', [official, source]);
   t.after(() => store.close());
+  const early = timestamp - 3600000;
   store.record([
-    report(official, timestamp, [
-      { drawId: 122, raw, drawAt: toIso(timestamp - 210000), timeKind: 'draw' },
-      { drawId: 123, raw, drawAt: toIso(timestamp - 3600000), timeKind: 'draw' },
-    ]),
-    report(source, timestamp, [{ drawId: 123, numbers: [2, 1, 2], drawAt: toIso(timestamp), timeKind: 'draw' }]),
+    report(official, timestamp, [checked(123, timestamp, early)]),
+    report(source, timestamp, [{ drawId: 123, numbers: [2, 1, 2], drawAt: toIso(early), timeKind: 'draw' }]),
   ], timestamp);
-  const anomalies = store.drawDetails(123, timestamp).anomalies;
-  assert.deepEqual(anomalies.map(row => [row.sourceId, row.type]), [['bclc', 'time_mismatch']]);
+  const start = store.dashboard(timestamp);
+  assert.equal(start.referenceClock.status, 'corrected');
+  assert.equal(start.referenceClock.offsetSeconds, -3600);
+  assert.equal(start.timeSources[0].status, 'offset');
+  assert.equal(start.draws[0].officialAt, toIso(timestamp));
+  assert.equal(start.draws[0].anomalyCount, 0);
+  assert.deepEqual(start.timing.map(row => row.type).sort(), ['reference_clock', 'source_clock']);
+
+  const next = timestamp + 210000;
+  store.record([
+    report(official, next, [checked(124, next), { drawId: 123, raw, drawAt: toIso(early), timeOrigin: 'archive', timeKind: 'draw' }]),
+    report(source, next, [{ drawId: 124, numbers: [2, 1, 2], drawAt: toIso(next), timeKind: 'draw' }]),
+  ], next);
+  const continuing = store.dashboard(next);
+  assert.equal(continuing.timeSources[0].drawId, 124);
+  assert.equal(continuing.timeSources[0].status, 'aligned');
+  assert.equal(continuing.draws.find(row => row.drawId === 123).officialAt, toIso(timestamp));
+  assert.ok(continuing.timing.every(row => row.status === 'open'));
+
+  store.record([
+    report(official, next + 1000, [{ drawId: 123, raw, drawAt: toIso(timestamp), timeOrigin: 'archive', timeKind: 'draw' }]),
+    report(source, next + 1000, [{ drawId: 123, numbers: [2, 1, 2], drawAt: toIso(timestamp), timeKind: 'draw' }]),
+  ], next + 1000);
+  const restored = store.drawDetails(123, next + 1000);
+  assert.deepEqual(restored.anomalies, []);
+  assert.ok(restored.timing.every(row => row.status === 'resolved' && row.sourceAt === toIso(early)));
 });
 
 test('uses the nearest day when a source only publishes a clock time', t => {
   const store = openStore(':memory:', [official, source]);
   t.after(() => store.close());
   store.record([
-    report(official, timestamp, [{ drawId: 123, raw, drawAt: toIso(timestamp), timeKind: 'draw' }]),
+    report(official, timestamp, [checked(123)]),
     report(source, timestamp, [{ drawId: 123, numbers: [2, 1, 2], drawAt: toIso(timestamp - 23 * 3600000),
       timeLabel: '19:00', timeKind: 'clock', precisionMs: 60000 }]),
   ], timestamp);
-  const [anomaly] = store.drawDetails(123, timestamp).anomalies;
-  assert.equal(anomaly.type, 'time_mismatch');
+  const [anomaly] = store.drawDetails(123, timestamp).timing;
+  assert.equal(anomaly.type, 'source_clock');
   assert.equal(anomaly.sourceAt, toIso(timestamp + 3600000));
 });
 
-test('tracks missing and late results when they are observed live', t => {
-  const store = openStore(':memory:', [official, source], { lateAfterMs: 60000 });
+test('keeps missing and late results out of the anomaly list and waits for verified time', t => {
+  const store = openStore(':memory:', [official, source]);
   t.after(() => store.close());
   const previous = { drawId: 122, numbers: [1, 1, 1], drawAt: toIso(timestamp - 210000) };
   store.record([report(source, timestamp - 1000, [previous])], timestamp - 1000);
   store.record([report(official, timestamp, [{ drawId: 123, raw, drawAt: toIso(timestamp), timeKind: 'draw' }])], timestamp);
-  store.record([report(source, timestamp + 61000, [previous])], timestamp + 61000);
-  assert.equal(store.drawDetails(123, timestamp + 61000).anomalies[0].type, 'missing_result');
-  store.record([report(source, timestamp + 90000, [{ drawId: 123, numbers: [2, 1, 2] }])], timestamp + 90000);
-  assert.deepEqual(store.drawDetails(123, timestamp + 90000).anomalies.map(row => [row.type, row.status]),
-    [['late_source', 'resolved'], ['missing_result', 'resolved']]);
+  store.record([report(source, timestamp + 190000, [previous])], timestamp + 190000);
+  assert.deepEqual(store.drawDetails(123, timestamp + 190000).anomalies, []);
+  store.record([report(source, timestamp + 250000, [{ drawId: 123, numbers: [2, 1, 2],
+    drawAt: toIso(timestamp - 3600000), timeKind: 'draw' }])], timestamp + 250000);
+  const snapshot = store.dashboard(timestamp + 250000);
+  assert.equal(snapshot.referenceClock.status, 'unverified');
+  assert.equal(snapshot.draws[0].matched, 1);
+  assert.equal(snapshot.draws[0].anomalyCount, 0);
+  assert.deepEqual(snapshot.timing, []);
+  assert.deepEqual(snapshot.timeSources, []);
+});
+
+test('checks a BCLC one-hour shift from fresh elapsed-time evidence and keeps permanent Pacific time in March', () => {
+  const canonical = Date.parse('2026-11-21T17:44:00Z');
+  const serverAt = canonical + 54000;
+  const input = {
+    requestStartedAt: serverAt - 500, responseReceivedAt: serverAt + 400, serverDate: new Date(serverAt).toUTCString(),
+    age: null, elapsedMs: 53999, liveTime: '2026-11-21T09:44:00.000', archiveTime: 'Nov 21, 2026 9:44:00 AM', observedArchive: true,
+  };
+  const verified = calibrateOfficialClock(input);
+  assert.equal(verified.drawAt, toIso(canonical));
+  assert.equal(verified.clock.offsetSeconds, -3600);
+  assert.equal(verified.clock.reportedAt, toIso(canonical - 3600000));
+  assert.equal(calibrateOfficialClock({ ...input, age: '60' }), undefined);
+  assert.equal(officialTime('2027-03-14T02:00:00').drawAt, '2027-03-14T09:00:00.000Z');
 });
 
 test('prunes observations and flags at 24 hours and ignores an old replay', t => {

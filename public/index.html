@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#101925">
   <meta name="description" content="按期号对照 BCLC Keno 原始开奖和加拿大28数据源，查看近24小时记录及异常。">
   <title>开奖源对账台</title>
-  <link rel="stylesheet" href="/styles.css?v=draw-errors">
-  <script type="module" src="/dashboard.js?v=draw-errors"></script>
+  <link rel="stylesheet" href="/styles.css?v=time-checks">
+  <script type="module" src="/dashboard.js?v=time-checks"></script>
 </head>
 <body>
   <div class="layout">
@@ -19,6 +19,7 @@
       <nav class="navigation" aria-label="页面导航">
         <button type="button" data-view="overview" aria-current="page"><i class="nav-icon icon-grid" aria-hidden="true"></i>监控总览</button>
         <button type="button" data-view="anomalies"><i class="nav-icon icon-alert" aria-hidden="true">!</i>异常记录 <span id="nav-anomaly-count" class="nav-count" hidden>0</span></button>
+        <button type="button" data-view="timing"><i class="nav-icon icon-clock" aria-hidden="true"></i>时间校验 <span id="nav-timing-count" class="nav-count nav-count-timing" hidden>0</span></button>
         <button type="button" data-view="sources"><i class="nav-icon icon-source" aria-hidden="true"></i>数据源</button>
       </nav>
       <div class="sidebar-footer">
@@ -43,7 +44,7 @@
             <div class="official-heading"><h2 id="official-title">BCLC Keno</h2><span class="pill pill-official">官方基准</span></div>
             <div class="official-draw"><span>最新期号</span><strong id="reference-draw">—</strong></div>
             <div id="reference-numbers" class="numbers reference-numbers" aria-label="官方开奖号码">等待官方数据</div>
-            <p class="official-foot"><span>开奖时间</span> <time id="reference-time">—</time></p>
+            <p class="official-foot"><span id="reference-time-label">BCLC 标注时间</span> <time id="reference-time">—</time></p>
           </section>
           <div class="metrics">
             <article class="metric"><span>数据源在线</span><strong id="metric-sources">—</strong><small id="metric-source-detail">正在读取采集状态</small></article>
@@ -57,7 +58,7 @@
             <div class="panel-heading"><div><h2 id="draw-list-title">期号对账</h2><p>按同一期号比对官方号码和各来源结果</p></div><span class="pill">近 24 小时</span></div>
             <div class="toolbar">
               <label class="search"><span class="search-icon" aria-hidden="true"></span><input type="search" id="draw-query" placeholder="搜索期号" aria-label="搜索期号" inputmode="numeric"></label>
-              <label class="select-label"><select id="draw-filter" aria-label="对账状态"><option value="all">全部状态</option><option value="anomaly">有异常</option><option value="pending">待对账</option><option value="matched">号码一致</option></select></label>
+              <label class="select-label"><select id="draw-filter" aria-label="对账状态"><option value="all">全部状态</option><option value="anomaly">有开奖错误记录</option><option value="pending">待对账</option><option value="matched">号码一致</option></select></label>
             </div>
             <div class="table-wrap">
               <table class="table" aria-labelledby="draw-list-title">
@@ -78,10 +79,9 @@
       </section>
 
       <section id="view-anomalies" class="panel secondary-panel" aria-label="异常记录" hidden>
-        <div class="panel-heading"><div><h2>对账异常</h2><p>查看号码、时间、延迟及缺期记录</p></div></div>
+        <div class="panel-heading"><div><h2>开奖不一致记录</h2><p>来源的三位开奖号码或原始 20 码与 BCLC 不一致时记录。</p></div></div>
         <div class="toolbar anomaly-toolbar">
           <label class="search"><span class="search-icon" aria-hidden="true"></span><input type="search" id="anomaly-query" placeholder="搜索期号或数据源" aria-label="搜索异常记录"></label>
-          <label class="select-label"><select id="anomaly-type" aria-label="异常类型"><option value="all">全部类型</option><option value="numbers_mismatch">开奖错误（含错期）</option><option value="time_mismatch">开奖时间偏差</option><option value="late_source">来源延迟</option><option value="missing_result">来源缺期</option></select></label>
           <label class="select-label"><select id="anomaly-status" aria-label="处理状态"><option value="all">全部状态</option><option value="open">待核查</option><option value="resolved">已恢复</option></select></label>
         </div>
         <div class="table-wrap">
@@ -92,6 +92,45 @@
           <div class="empty" id="anomaly-empty"><i class="empty-icon" aria-hidden="true"></i><strong>正在读取异常记录</strong></div>
         </div>
         <div class="pagination" id="anomaly-pages" hidden><span id="anomaly-page-label"></span><div><button type="button" class="button button-small" id="anomaly-prev">上一页</button><button type="button" class="button button-small" id="anomaly-next">下一页</button></div></div>
+      </section>
+
+      <section id="view-timing" class="panel secondary-panel" aria-label="开奖时间校验" hidden>
+        <div class="panel-heading"><div><h2>开奖时间校验</h2><p>核对 BCLC 官方时间，跟踪各来源的时间偏差和修正情况。</p></div><span class="pill" id="timing-count-label">正在读取</span></div>
+        <div class="timing-reference">
+          <div>
+            <strong>BCLC Keno 官方时间</strong>
+            <p id="timing-reference-note" hidden></p>
+          </div>
+          <dl>
+            <div><dt>期号</dt><dd id="timing-reference-draw">—</dd></div>
+            <div><dt>核验基准时间</dt><dd id="timing-reference-at">—</dd></div>
+            <div><dt>BCLC 标注时间</dt><dd id="timing-reference-reported">—</dd></div>
+            <div><dt>最近校验</dt><dd id="timing-reference-checked">—</dd></div>
+          </dl>
+          <span id="timing-reference-state" class="badge badge-pending">正在读取</span>
+        </div>
+        <div class="toolbar">
+          <label class="search"><span class="search-icon" aria-hidden="true"></span><input type="search" id="timing-query" placeholder="搜索期号或数据源" aria-label="搜索时间校验记录"></label>
+          <label class="select-label"><select id="timing-status" aria-label="时间校验状态"><option value="all">全部状态</option><option value="open">待核查</option><option value="resolved">已恢复</option></select></label>
+        </div>
+        <div class="table-wrap">
+          <table class="table" aria-label="开奖时间校验记录">
+            <thead><tr><th scope="col">期号</th><th scope="col">数据源</th><th scope="col">发现时的时间对照</th><th scope="col">首次发现</th><th scope="col">状态</th></tr></thead>
+            <tbody id="timing-rows"></tbody>
+          </table>
+          <div class="empty" id="timing-empty"><i class="empty-icon" aria-hidden="true"></i><strong>正在读取时间校验记录</strong></div>
+        </div>
+        <div class="pagination" id="timing-pages" hidden><span id="timing-page-label"></span><div><button type="button" class="button button-small" id="timing-prev">上一页</button><button type="button" class="button button-small" id="timing-next">下一页</button></div></div>
+        <details class="timing-sources" open>
+          <summary>各来源最近一次时间对照</summary>
+          <div class="table-wrap">
+            <table class="table" aria-label="各来源最近一次时间对照">
+              <thead><tr><th scope="col">数据源</th><th scope="col">比对期号</th><th scope="col">BCLC 核验时间</th><th scope="col">来源标注时间</th><th scope="col">时间差</th><th scope="col">状态</th></tr></thead>
+              <tbody id="timing-source-rows"></tbody>
+            </table>
+            <div class="empty empty-compact" id="timing-source-empty" hidden><strong>暂无第三方数据源</strong></div>
+          </div>
+        </details>
       </section>
 
       <section id="view-sources" class="panel secondary-panel" aria-label="数据源" hidden>

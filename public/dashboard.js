@@ -4,17 +4,11 @@ const displayDate = new Intl.DateTimeFormat('zh-CN', {
   timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
-const anomalyLabels = {
-  numbers_mismatch: ['开奖错误', 'error'],
-  time_mismatch: ['开奖时间偏差', 'warning'],
-  late_source: ['来源延迟', 'warning'],
-  missing_result: ['来源缺期', 'error'],
-};
-const sourceLabels = { ok: ['在线', 'ok'], error: ['采集异常', 'error'], stale: ['数据过期', 'warning'], pending: ['等待采集', 'pending'] };
-const viewLabels = { overview: '监控总览', anomalies: '异常记录', sources: '数据源' };
+const sourceLabels = { ok: ['在线', 'ok'], error: ['采集失败', 'error'], stale: ['数据过期', 'warning'], pending: ['等待采集', 'pending'] };
+const viewLabels = { overview: '监控总览', anomalies: '异常记录', timing: '时间校验', sources: '数据源' };
 const timeLabels = { draw: '开奖时间', clock: '来源仅提供时分', observed: '记录时间', uncertain: '时间口径待确认' };
 const pageSize = 12;
-const pages = { draw: 1, anomaly: 1 };
+const pages = { draw: 1, anomaly: 1, timing: 1 };
 let dashboard = null;
 let refreshTimer;
 let loadingDashboard = false;
@@ -65,7 +59,6 @@ function badge(label, color) {
 
 function rowState(draw) {
   if (draw.numberErrorCount) return ['anomaly', draw.openNumberErrorCount ? '开奖错误' : '开奖错误已恢复', 'error'];
-  if (draw.anomalyCount) return ['anomaly', '有异常记录', 'warning'];
   if (draw.officialNumbers && draw.total && draw.matched === draw.total) return ['matched', '号码一致', 'ok'];
   return ['pending', '待对账', 'pending'];
 }
@@ -107,7 +100,7 @@ function renderDraws() {
     (filter === 'all' || rowState(draw)[0] === filter));
   byId('draw-rows').innerHTML = paginate('draw', filtered).map(draw => {
     const [status, label, color] = rowState(draw);
-    const rowClass = draw.numberErrorCount ? ' class="row-number-error"' : status === 'anomaly' ? ' class="row-anomaly"' : '';
+    const rowClass = status === 'anomaly' ? ' class="row-number-error"' : '';
     const comparison = draw.officialNumbers && draw.matched !== null && draw.matched !== undefined
       ? '<strong>' + escapeText(draw.matched) + '</strong> / ' + escapeText(draw.total)
       : emptyValue + ' / ' + escapeText(draw.total);
@@ -120,12 +113,10 @@ function renderDraws() {
     search || filter !== 'all' ? '可修改搜索词或选择全部状态。' : '采集成功后，期号会自动出现在这里。');
 }
 
-function anomalyLabel(issue) {
-  if (issue.type === 'numbers_mismatch') {
-    if (issue.evidence?.priorMatch === 'raw') return ['开奖错误 · 错期', 'error'];
-    if (issue.evidence?.priorMatch === 'time_and_numbers') return ['开奖错误 · 疑似错期', 'error'];
-  }
-  return anomalyLabels[issue.type] || ['数据异常', 'warning'];
+function numberErrorLabel(issue) {
+  if (issue.evidence?.priorMatch === 'raw') return '开奖错误 · 错期';
+  if (issue.evidence?.priorMatch === 'time_and_numbers') return '开奖错误 · 疑似错期';
+  return '开奖错误';
 }
 
 function anomalyStatus(issue) {
@@ -136,19 +127,9 @@ function compareLine(label, value) {
   return '<span class="compare-line">' + label + ' ' + value + '</span>';
 }
 
-function anomalyComparison(issue) {
-  if (issue.type === 'numbers_mismatch') {
-    const format = values => Array.isArray(values) ? escapeText(values.join(' + ')) : emptyValue;
-    return compareLine('BCLC', format(issue.officialNumbers)) + compareLine('来源当时', format(issue.sourceNumbers));
-  }
-  if (issue.type === 'time_mismatch') return anomalyTimes(issue);
-  return '';
-}
-
-function anomalyTimes(issue) {
-  const bclcClockError = issue.sourceId === 'bclc' && issue.type === 'time_mismatch';
-  return compareLine(bclcClockError ? 'BCLC 上一期时间' : 'BCLC 开奖时间', timeMarkup(issue.officialAt)) +
-    compareLine(bclcClockError ? 'BCLC 本期时间' : '来源标注时间', timeMarkup(issue.sourceAt));
+function compareNumbers(issue) {
+  const format = values => Array.isArray(values) ? escapeText(values.join(' + ')) : emptyValue;
+  return compareLine('BCLC', format(issue.officialNumbers)) + compareLine('来源当时', format(issue.sourceNumbers));
 }
 
 function rawDisclosure(values, label) {
@@ -162,8 +143,9 @@ function compareNumberError(issue) {
   const priorEvidence = { raw: '来源原始 20 码与', time_and_numbers: '来源号码和时间与' }[priorMatch];
   const prior = priorEvidence && Number.isSafeInteger(priorDrawId)
     ? '<span class="compare-line">' + priorEvidence + ' BCLC 第 ' + priorDrawId + ' 期一致</span>' : '';
-  const timing = issue.officialAt || issue.sourceAt ? anomalyTimes(issue) : '';
-  return anomalyComparison(issue) + timing + prior +
+  const timing = issue.officialAt || issue.sourceAt
+    ? compareLine('BCLC 开奖时间', timeMarkup(issue.officialAt)) + compareLine('来源标注时间', timeMarkup(issue.sourceAt)) : '';
+  return compareNumbers(issue) + timing + prior +
     rawDisclosure(officialRaw, '异常时 BCLC 原始 20 码') +
     rawDisclosure(sourceRaw, '来源当时发布的原始 20 码');
 }
@@ -171,23 +153,82 @@ function compareNumberError(issue) {
 function renderAnomalies() {
   if (!dashboard) return;
   const search = byId('anomaly-query').value.trim().toLocaleLowerCase();
-  const type = byId('anomaly-type').value;
   const status = byId('anomaly-status').value;
   const items = dashboard.anomalies.filter(issue =>
-    (type === 'all' || issue.type === type) && (status === 'all' || issue.status === status) &&
-    (String(issue.drawId).includes(search) || String(sourceName(issue.sourceId)).toLocaleLowerCase().includes(search)))
-    .sort((a, b) => Number(b.type === 'numbers_mismatch') - Number(a.type === 'numbers_mismatch'));
+    (status === 'all' || issue.status === status) &&
+    (String(issue.drawId).includes(search) || String(sourceName(issue.sourceId)).toLocaleLowerCase().includes(search)));
   byId('anomaly-rows').innerHTML = paginate('anomaly', items).map(issue => {
-    const [label, color] = anomalyLabel(issue);
-    const rowClass = issue.type === 'numbers_mismatch' ? ' class="row-number-error"' : '';
-    return '<tr' + rowClass + '><td>' + drawButton(issue.drawId) + '</td><td>' + escapeText(sourceName(issue.sourceId)) +
-      '</td><td>' + badge(label, color) + '</td><td class="issue-detail">' + escapeText(issue.detail) +
-      anomalyComparison(issue) + '</td><td class="date-cell">' + timeMarkup(issue.firstSeenAt) +
+    return '<tr class="row-number-error"><td>' + drawButton(issue.drawId) + '</td><td>' + escapeText(sourceName(issue.sourceId)) +
+      '</td><td>' + badge(numberErrorLabel(issue), 'error') + '</td><td class="issue-detail">' + escapeText(issue.detail) +
+      compareNumbers(issue) + '</td><td class="date-cell">' + timeMarkup(issue.firstSeenAt) +
       '</td><td>' + anomalyStatus(issue) + '</td></tr>';
   }).join('');
-  const filtering = search || type !== 'all' || status !== 'all';
-  setEmpty('anomaly-empty', !items.length, filtering ? '没有符合筛选条件的异常' : '近 24 小时暂无异常记录',
-    filtering ? '可修改搜索词或筛选条件。' : '检测出差异后会自动标记。');
+  const filtering = search || status !== 'all';
+  setEmpty('anomaly-empty', !items.length, filtering ? '没有符合筛选条件的记录' : '近 24 小时暂无开奖不一致记录');
+}
+
+function timingComparison(issue) {
+  const label = issue.type === 'reference_clock' ? 'BCLC 标注时间' : '来源标注时间';
+  return compareLine('BCLC 核验时间', timeMarkup(issue.officialAt)) + compareLine(label, timeMarkup(issue.sourceAt));
+}
+
+function timingStatus(issue) {
+  return issue.status === 'resolved'
+    ? badge('已恢复', 'ok') + '<span class="section-label">' + timeMarkup(issue.lastSeenAt) + '</span>'
+    : badge('待核查', 'info');
+}
+
+function clockDifference(seconds) {
+  if (!Number.isFinite(seconds)) return emptyValue;
+  if (seconds === 0) return '0 秒';
+  return (seconds < 0 ? '早 ' : '晚 ') + Math.abs(seconds) + ' 秒';
+}
+
+function renderTiming() {
+  if (!dashboard) return;
+  const { draws, sources, referenceClock: clock, timing = [], timeSources = [] } = dashboard;
+  const official = sources.find(source => source.kind === 'official');
+  const latest = draws.find(draw => draw.officialNumbers);
+  setText('timing-reference-draw', clock?.drawId ?? official?.latestDrawId ?? latest?.drawId ?? emptyValue);
+  setText('timing-reference-at', displayTime(clock?.referenceAt));
+  setText('timing-reference-reported', displayTime(clock?.reportedAt || official?.latestDrawAt || latest?.officialAt));
+  setText('timing-reference-checked', displayTime(clock?.checkedAt));
+  const clockStates = { verified: ['已核验', 'ok'], corrected: ['基准已校正', 'info'], unverified: ['待核验', 'pending'] };
+  const [clockLabel, clockColor] = clockStates[clock?.status] || clockStates.unverified;
+  const clockBadge = byId('timing-reference-state');
+  clockBadge.textContent = clockLabel;
+  clockBadge.className = 'badge badge-' + clockColor;
+  const clockNote = byId('timing-reference-note');
+  clockNote.hidden = clock?.status !== 'corrected';
+  if (!clockNote.hidden) clockNote.textContent = 'BCLC 标注比核验基准 ' + clockDifference(clock.offsetSeconds);
+
+  const open = timing.filter(issue => issue.status === 'open').length;
+  setText('timing-count-label', open + ' 条待核查 · ' + (timing.length - open) + ' 条已恢复');
+  setText('nav-timing-count', open);
+  byId('nav-timing-count').hidden = open === 0;
+  const search = byId('timing-query').value.trim().toLocaleLowerCase();
+  const status = byId('timing-status').value;
+  const items = timing.filter(issue =>
+    (status === 'all' || issue.status === status) &&
+    (String(issue.drawId).includes(search) || String(sourceName(issue.sourceId)).toLocaleLowerCase().includes(search)));
+  byId('timing-rows').innerHTML = paginate('timing', items).map(issue =>
+    '<tr><td>' + drawButton(issue.drawId) + '</td><td>' + escapeText(sourceName(issue.sourceId)) +
+    '</td><td class="issue-detail">' + escapeText(issue.detail) + timingComparison(issue) +
+    '</td><td class="date-cell">' + timeMarkup(issue.firstSeenAt) + '</td><td>' + timingStatus(issue) + '</td></tr>'
+  ).join('');
+  setEmpty('timing-empty', !items.length, search || status !== 'all' ? '没有符合筛选条件的记录' : '近 24 小时暂无时间偏差记录');
+
+  const latestBySource = new Map(timeSources.map(source => [source.sourceId, source]));
+  const thirdParties = sources.filter(source => source.kind !== 'official');
+  byId('timing-source-rows').innerHTML = thirdParties.map(source => {
+    const result = latestBySource.get(source.id);
+    const state = result?.status === 'aligned' ? badge('时间一致', 'ok') : result?.status === 'offset'
+      ? badge('存在偏差', 'info') : badge('待比对', 'pending');
+    return '<tr><td>' + escapeText(source.name) + '</td><td>' + drawButton(result?.drawId) +
+      '</td><td class="date-cell">' + timeMarkup(result?.officialAt) + '</td><td class="date-cell">' + timeMarkup(result?.sourceAt) +
+      '</td><td>' + escapeText(clockDifference(result?.offsetSeconds)) + '</td><td>' + state + '</td></tr>';
+  }).join('');
+  setEmpty('timing-source-empty', !thirdParties.length, '暂无第三方数据源');
 }
 
 function renderSources() {
@@ -225,35 +266,35 @@ function renderSources() {
 }
 
 function renderDashboard() {
-  const { sources, anomalies, draws } = dashboard;
+  const { sources, anomalies, draws, referenceClock } = dashboard;
   const online = sources.filter(source => source.status === 'ok').length;
   const offline = sources.filter(source => source.status === 'error').length;
   const stale = sources.filter(source => source.status === 'stale').length;
   const pending = sources.filter(source => source.status === 'pending').length;
   const open = anomalies.filter(issue => issue.status === 'open').length;
-  const numberErrors = anomalies.filter(issue => issue.type === 'numbers_mismatch').length;
   const official = sources.find(source => source.kind === 'official');
   const reference = draws.find(draw => draw.officialNumbers);
   const referenceId = official?.latestDrawId || reference?.drawId;
   const referenceMatch = draws.find(draw => draw.drawId === referenceId);
+  const checkedReferenceAt = referenceClock?.drawId === referenceId ? referenceClock?.referenceAt : null;
   setText('last-update', displayTime(dashboard.generatedAt));
   setText('reference-draw', referenceId ?? emptyValue);
-  setText('reference-time', displayTime(referenceMatch?.officialAt || official?.latestDrawAt));
+  setText('reference-time-label', checkedReferenceAt ? '核验开奖时间' : 'BCLC 标注时间');
+  setText('reference-time', displayTime(checkedReferenceAt || referenceMatch?.officialAt || official?.latestDrawAt));
   byId('reference-numbers').innerHTML = numbersMarkup(referenceMatch?.officialNumbers, '等待官方数据');
   setText('metric-sources', online + ' / ' + sources.length);
-  const problems = [offline && offline + ' 个采集异常', stale && stale + ' 个数据过期', pending && pending + ' 个等待采集'].filter(Boolean);
-  setText('metric-source-detail', problems.join(' · ') || (sources.length ? '暂无采集异常' : '等待配置数据源'));
+  const problems = [offline && offline + ' 个采集失败', stale && stale + ' 个数据过期', pending && pending + ' 个等待采集'].filter(Boolean);
+  setText('metric-source-detail', problems.join(' · ') || (sources.length ? '各数据源采集正常' : '等待配置数据源'));
   setText('metric-draws', draws.length);
   setText('retention-copy', '最近 ' + (dashboard.retentionHours || 24) + ' 小时');
-  setText('metric-alerts', numberErrors);
-  setText('metric-alert-open', open + ' 条异常待核查');
-  byId('metric-alerts').classList.toggle('has-number-errors', numberErrors > 0);
+  setText('metric-alerts', anomalies.length);
+  setText('metric-alert-open', open + ' 条待核查');
+  byId('metric-alerts').classList.toggle('has-number-errors', anomalies.length > 0);
   setText('nav-anomaly-count', anomalies.length);
-  byId('nav-anomaly-count').classList.toggle('has-number-errors', numberErrors > 0);
   byId('nav-anomaly-count').hidden = anomalies.length === 0;
   const state = offline ? 'error' : stale ? 'warning' : online ? 'ok' : 'pending';
   byId('sidebar-dot').className = 'status-dot status-' + state;
-  setText('sidebar-status', offline || stale ? '部分来源采集异常' : online ? '采集服务运行中' : '等待首次采集');
+  setText('sidebar-status', offline || stale ? '部分来源暂无新数据' : online ? '采集服务运行中' : '等待首次采集');
   setText('sidebar-cadence', '采集间隔 ' + (dashboard.pollIntervalSeconds || 30) + ' 秒');
   const notice = byId('notice');
   if (!official || official.status !== 'ok') {
@@ -266,6 +307,7 @@ function renderDashboard() {
   }
   renderDraws();
   renderAnomalies();
+  renderTiming();
   renderSources();
 }
 
@@ -291,6 +333,7 @@ async function refreshDashboard() {
     if (!dashboard) {
       setEmpty('draw-empty', true, '未能读取对账记录');
       setEmpty('anomaly-empty', true, '未能读取异常记录');
+      setEmpty('timing-empty', true, '未能读取时间校验记录');
       setEmpty('source-empty', true, '未能读取数据源');
     }
   } finally {
@@ -318,24 +361,17 @@ function changeView(view, updateHash = true) {
 
 function detailTable(data) {
   const issues = data.anomalies.map(issue => {
-    const [label, color] = anomalyLabel(issue);
-    const numberError = issue.type === 'numbers_mismatch';
-    return '<div class="dialog-alert' + (numberError ? ' dialog-alert-number' : '') + '"><div class="dialog-alert-heading"><strong>' +
-      escapeText(sourceName(issue.sourceId)) + '</strong>' + badge(label, color) + anomalyStatus(issue) + '</div><p>' + escapeText(issue.detail) +
-      '</p>' + (numberError ? compareNumberError(issue) : anomalyComparison(issue)) +
+    return '<div class="dialog-alert"><div class="dialog-alert-heading"><strong>' + escapeText(sourceName(issue.sourceId)) +
+      '</strong>' + badge(numberErrorLabel(issue), 'error') + anomalyStatus(issue) + '</div><p>' + escapeText(issue.detail) +
+      '</p>' + compareNumberError(issue) +
       compareLine('首次发现', timeMarkup(issue.firstSeenAt)) + '</div>';
   }).join('');
   const official = data.observations.find(source => source.kind === 'official');
   const rows = data.observations.map(source => {
-    const sourceIssues = data.anomalies.filter(issue => issue.sourceId === source.sourceId);
-    const numberIssues = sourceIssues.filter(issue => issue.type === 'numbers_mismatch');
-    const currentNumberIssue = numberIssues.find(issue => issue.status === 'open');
+    const issue = data.anomalies.find(issue => issue.sourceId === source.sourceId);
     let comparison;
     if (source.kind === 'official') comparison = badge('官方基准', 'info');
-    else if (currentNumberIssue) comparison = badge(anomalyLabel(currentNumberIssue)[0], 'error');
-    else if (numberIssues.length) comparison = badge('开奖错误已恢复', 'error');
-    else if (sourceIssues.some(issue => issue.status === 'open')) comparison = badge('待核查', 'warning');
-    else if (sourceIssues.length) comparison = badge('有异常记录', 'info');
+    else if (issue) comparison = badge(issue.status === 'resolved' ? '开奖错误已恢复' : numberErrorLabel(issue), 'error');
     else comparison = official ? badge('号码一致', 'ok') : badge('待官方', 'pending');
     const raw = rawDisclosure(source.raw, 'Keno 原始 20 码');
     const shownTime = source.drawAt ? timeMarkup(source.drawAt) : escapeText(source.timeLabel || emptyValue);
@@ -345,10 +381,16 @@ function detailTable(data) {
       (timeKind ? '<span class="section-label">' + escapeText(timeKind) + '</span>' : '') + '</td><td class="date-cell">' +
       timeMarkup(source.firstSeenAt) + '</td><td>' + comparison + '</td></tr>';
   }).join('');
+  const timing = (data.timing || []).map(issue =>
+    '<div class="dialog-alert"><div class="dialog-alert-heading"><strong>' + escapeText(sourceName(issue.sourceId)) +
+    '</strong>' + timingStatus(issue) + '</div><p>' + escapeText(issue.detail) + '</p>' + timingComparison(issue) +
+    compareLine('首次发现', timeMarkup(issue.firstSeenAt)) + '</div>'
+  ).join('');
   return (issues ? '<div class="dialog-alerts">' + issues + '</div>' : '') +
     '<div class="table-wrap"><table class="table" aria-label="逐源核对结果"><thead><tr><th scope="col">数据源</th>' +
     '<th scope="col">开奖号码</th><th scope="col">来源时间</th><th scope="col">首次采集</th><th scope="col">状态</th></tr></thead>' +
-    '<tbody>' + rows + '</tbody></table></div>';
+    '<tbody>' + rows + '</tbody></table></div>' +
+    (timing ? '<section class="dialog-timing" aria-label="时间校验"><h3>时间校验</h3>' + timing + '</section>' : '');
 }
 
 async function showDraw(drawId) {
@@ -382,7 +424,8 @@ window.addEventListener('hashchange', () => changeView(window.location.hash.slic
 
 for (const [type, render, controlIds] of [
   ['draw', renderDraws, ['draw-query', 'draw-filter']],
-  ['anomaly', renderAnomalies, ['anomaly-query', 'anomaly-type', 'anomaly-status']],
+  ['anomaly', renderAnomalies, ['anomaly-query', 'anomaly-status']],
+  ['timing', renderTiming, ['timing-query', 'timing-status']],
 ]) {
   for (const id of controlIds) {
     const control = byId(id);

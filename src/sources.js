@@ -1,4 +1,4 @@
-import { createRow, officialTime, parseRawNumbers, reportedTime } from './normalize.js';
+import { calibrateOfficialClock, createRow, officialTime, parseRawNumbers, reportedTime } from './normalize.js';
 
 const BCLC = 'https://www.bclc.com/services2/keno';
 const MAX_BODY_BYTES = 2_000_000;
@@ -6,8 +6,10 @@ const ROW_LIMIT = 24;
 const ISO_PART = /\b\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?/;
 const CLOCK_PART = /\b\d{2}:\d{2}(?::\d{2})?\b/;
 
-async function read(url, signal, accept) {
+async function readPayload(url, signal, accept) {
+  const requestStartedAt = Date.now();
   const response = await fetch(url, { signal, ...(accept ? { headers: { Accept: accept } } : {}) });
+  const responseReceivedAt = Date.now();
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   if (!response.body || Number(response.headers.get('content-length')) > MAX_BODY_BYTES) {
     await response.body?.cancel();
@@ -23,16 +25,27 @@ async function read(url, signal, accept) {
     parts.push(decoder.decode(chunk, { stream: true }));
   }
   parts.push(decoder.decode());
-  return parts.join('');
+  return {
+    body: parts.join(''), requestStartedAt, responseReceivedAt,
+    serverDate: response.headers.get('date'), age: response.headers.get('age'),
+  };
 }
 
-async function readJson(url, signal) {
-  const body = await read(url, signal, 'application/json');
+async function read(url, signal) {
+  return (await readPayload(url, signal)).body;
+}
+
+async function readJsonPayload(url, signal) {
+  const { body, ...http } = await readPayload(url, signal, 'application/json');
   try {
-    return JSON.parse(body);
+    return { data: JSON.parse(body), ...http };
   } catch {
     throw new Error('数据接口未返回有效 JSON');
   }
+}
+
+async function readJson(url, signal) {
+  return (await readJsonPayload(url, signal)).data;
 }
 
 function finish(input) {
@@ -104,6 +117,10 @@ function pc2868History(data) {
   return (data.data ?? []).map((row) => createRow(row.expect, row.opencode, undefined, reportedTime(row.opentime)));
 }
 
+function formatArchiveTime(row) {
+  return row ? `${row.drawDate} ${row.drawTime}` : undefined;
+}
+
 const official = {
   id: 'bclc', name: 'BCLC Keno', kind: 'official', group: 'BCLC 官方',
   url: 'https://www.playnow.com/keno/winning-numbers/',
@@ -111,15 +128,26 @@ const official = {
     const stamp = Date.now();
     const [history, live] = await Promise.allSettled([
       readJson(`${BCLC}/draw/latest/20/0?_=${stamp}`, signal),
-      readJson(`${BCLC}/nextdraw/?_=${stamp}`, signal),
+      readJsonPayload(`${BCLC}/nextdraw/?_=${stamp}`, signal),
     ]);
     if (history.status === 'rejected' && live.status === 'rejected') throw history.reason;
-    const rows = Array.isArray(history.value) ? history.value.map((item) => createRow(
-      item.drawNbr, undefined, item.drawNbrs, officialTime(`${item.drawDate} ${item.drawTime}`),
-    )) : [];
-    if (parseRawNumbers(live.value?.num)) rows.push(createRow(
-      live.value.draw, undefined, live.value.num, officialTime(live.value.drawDate),
-    ));
+    const archive = Array.isArray(history.value) ? history.value : [];
+    const rows = archive.map((item) => createRow(item.drawNbr, undefined, item.drawNbrs, {
+      ...officialTime(formatArchiveTime(item)), timeOrigin: 'archive',
+    }));
+    const latest = live.value?.data;
+    if (parseRawNumbers(latest?.num)) {
+      const sameIssue = archive.find((item) => Number(item.drawNbr) === Number(latest.draw));
+      const verified = calibrateOfficialClock({
+        ...live.value, elapsedMs: latest.timeSinceDraw, liveTime: latest.drawDate,
+        archiveTime: formatArchiveTime(sameIssue), observedArchive: Boolean(sameIssue),
+      });
+      const row = createRow(latest.draw, undefined, parseRawNumbers(sameIssue?.drawNbrs) ?? latest.num, {
+        ...(verified ?? officialTime(latest.drawDate)), timeOrigin: 'live',
+      });
+      if (verified) rows.unshift(row);
+      else rows.push(row);
+    }
     return finish(rows);
   },
 };
