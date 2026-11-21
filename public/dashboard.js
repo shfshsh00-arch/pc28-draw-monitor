@@ -5,7 +5,7 @@ const displayDate = new Intl.DateTimeFormat('zh-CN', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const anomalyLabels = {
-  numbers_mismatch: ['号码不一致', 'error'],
+  numbers_mismatch: ['开奖错误', 'error'],
   time_mismatch: ['开奖时间偏差', 'warning'],
   late_source: ['来源延迟', 'warning'],
   missing_result: ['来源缺期', 'error'],
@@ -64,6 +64,7 @@ function badge(label, color) {
 }
 
 function rowState(draw) {
+  if (draw.numberErrorCount) return ['anomaly', draw.openNumberErrorCount ? '开奖错误' : '开奖错误已恢复', 'error'];
   if (draw.anomalyCount) return ['anomaly', '有异常记录', 'warning'];
   if (draw.officialNumbers && draw.total && draw.matched === draw.total) return ['matched', '号码一致', 'ok'];
   return ['pending', '待对账', 'pending'];
@@ -106,10 +107,11 @@ function renderDraws() {
     (filter === 'all' || rowState(draw)[0] === filter));
   byId('draw-rows').innerHTML = paginate('draw', filtered).map(draw => {
     const [status, label, color] = rowState(draw);
+    const rowClass = draw.numberErrorCount ? ' class="row-number-error"' : status === 'anomaly' ? ' class="row-anomaly"' : '';
     const comparison = draw.officialNumbers && draw.matched !== null && draw.matched !== undefined
       ? '<strong>' + escapeText(draw.matched) + '</strong> / ' + escapeText(draw.total)
       : emptyValue + ' / ' + escapeText(draw.total);
-    return '<tr' + (status === 'anomaly' ? ' class="row-anomaly"' : '') + '><td>' + drawButton(draw.drawId) +
+    return '<tr' + rowClass + '><td>' + drawButton(draw.drawId) +
       '</td><td>' + numbersMarkup(draw.officialNumbers, '等候官方') +
       '</td><td class="date-cell">' + timeMarkup(draw.officialAt) +
       '</td><td class="count-cell">' + comparison + '</td><td>' + badge(label, color) + '</td></tr>';
@@ -118,15 +120,52 @@ function renderDraws() {
     search || filter !== 'all' ? '可修改搜索词或选择全部状态。' : '采集成功后，期号会自动出现在这里。');
 }
 
+function anomalyLabel(issue) {
+  if (issue.type === 'numbers_mismatch') {
+    if (issue.evidence?.priorMatch === 'raw') return ['开奖错误 · 错期', 'error'];
+    if (issue.evidence?.priorMatch === 'time_and_numbers') return ['开奖错误 · 疑似错期', 'error'];
+  }
+  return anomalyLabels[issue.type] || ['数据异常', 'warning'];
+}
+
+function anomalyStatus(issue) {
+  return issue.status === 'resolved' ? badge('已恢复', 'ok') : badge('待核查', 'warning');
+}
+
+function compareLine(label, value) {
+  return '<span class="compare-line">' + label + ' ' + value + '</span>';
+}
+
 function anomalyComparison(issue) {
   if (issue.type === 'numbers_mismatch') {
     const format = values => Array.isArray(values) ? escapeText(values.join(' + ')) : emptyValue;
-    return '<span class="compare-line">官方 ' + format(issue.officialNumbers) + '</span><span class="compare-line">来源 ' + format(issue.sourceNumbers) + '</span>';
+    return compareLine('BCLC', format(issue.officialNumbers)) + compareLine('来源当时', format(issue.sourceNumbers));
   }
-  if (issue.type === 'time_mismatch') {
-    return '<span class="compare-line">官方 ' + timeMarkup(issue.officialAt) + '</span><span class="compare-line">来源 ' + timeMarkup(issue.sourceAt) + '</span>';
-  }
+  if (issue.type === 'time_mismatch') return anomalyTimes(issue);
   return '';
+}
+
+function anomalyTimes(issue) {
+  const bclcClockError = issue.sourceId === 'bclc' && issue.type === 'time_mismatch';
+  return compareLine(bclcClockError ? 'BCLC 上一期时间' : 'BCLC 开奖时间', timeMarkup(issue.officialAt)) +
+    compareLine(bclcClockError ? 'BCLC 本期时间' : '来源标注时间', timeMarkup(issue.sourceAt));
+}
+
+function rawDisclosure(values, label) {
+  return Array.isArray(values) && values.length === 20
+    ? '<details class="section-label"><summary>' + label + '</summary>' + escapeText(values.join('、')) + '</details>'
+    : '';
+}
+
+function compareNumberError(issue) {
+  const { priorDrawId, priorMatch, officialRaw, sourceRaw } = issue.evidence || {};
+  const priorEvidence = { raw: '来源原始 20 码与', time_and_numbers: '来源号码和时间与' }[priorMatch];
+  const prior = priorEvidence && Number.isSafeInteger(priorDrawId)
+    ? '<span class="compare-line">' + priorEvidence + ' BCLC 第 ' + priorDrawId + ' 期一致</span>' : '';
+  const timing = issue.officialAt || issue.sourceAt ? anomalyTimes(issue) : '';
+  return anomalyComparison(issue) + timing + prior +
+    rawDisclosure(officialRaw, '异常时 BCLC 原始 20 码') +
+    rawDisclosure(sourceRaw, '来源当时发布的原始 20 码');
 }
 
 function renderAnomalies() {
@@ -136,13 +175,15 @@ function renderAnomalies() {
   const status = byId('anomaly-status').value;
   const items = dashboard.anomalies.filter(issue =>
     (type === 'all' || issue.type === type) && (status === 'all' || issue.status === status) &&
-    (String(issue.drawId).includes(search) || String(sourceName(issue.sourceId)).toLocaleLowerCase().includes(search)));
+    (String(issue.drawId).includes(search) || String(sourceName(issue.sourceId)).toLocaleLowerCase().includes(search)))
+    .sort((a, b) => Number(b.type === 'numbers_mismatch') - Number(a.type === 'numbers_mismatch'));
   byId('anomaly-rows').innerHTML = paginate('anomaly', items).map(issue => {
-    const [label, color] = anomalyLabels[issue.type] || ['数据异常', 'warning'];
-    return '<tr><td>' + drawButton(issue.drawId) + '</td><td>' + escapeText(sourceName(issue.sourceId)) +
+    const [label, color] = anomalyLabel(issue);
+    const rowClass = issue.type === 'numbers_mismatch' ? ' class="row-number-error"' : '';
+    return '<tr' + rowClass + '><td>' + drawButton(issue.drawId) + '</td><td>' + escapeText(sourceName(issue.sourceId)) +
       '</td><td>' + badge(label, color) + '</td><td class="issue-detail">' + escapeText(issue.detail) +
       anomalyComparison(issue) + '</td><td class="date-cell">' + timeMarkup(issue.firstSeenAt) +
-      '</td><td>' + (issue.status === 'resolved' ? badge('已恢复', 'ok') : badge('待核查', 'warning')) + '</td></tr>';
+      '</td><td>' + anomalyStatus(issue) + '</td></tr>';
   }).join('');
   const filtering = search || type !== 'all' || status !== 'all';
   setEmpty('anomaly-empty', !items.length, filtering ? '没有符合筛选条件的异常' : '近 24 小时暂无异常记录',
@@ -190,6 +231,7 @@ function renderDashboard() {
   const stale = sources.filter(source => source.status === 'stale').length;
   const pending = sources.filter(source => source.status === 'pending').length;
   const open = anomalies.filter(issue => issue.status === 'open').length;
+  const numberErrors = anomalies.filter(issue => issue.type === 'numbers_mismatch').length;
   const official = sources.find(source => source.kind === 'official');
   const reference = draws.find(draw => draw.officialNumbers);
   const referenceId = official?.latestDrawId || reference?.drawId;
@@ -203,10 +245,12 @@ function renderDashboard() {
   setText('metric-source-detail', problems.join(' · ') || (sources.length ? '暂无采集异常' : '等待配置数据源'));
   setText('metric-draws', draws.length);
   setText('retention-copy', '最近 ' + (dashboard.retentionHours || 24) + ' 小时');
-  setText('metric-alerts', open);
-  byId('metric-alerts').classList.toggle('has-alerts', open > 0);
-  setText('nav-anomaly-count', open);
-  byId('nav-anomaly-count').hidden = open === 0;
+  setText('metric-alerts', numberErrors);
+  setText('metric-alert-open', open + ' 条异常待核查');
+  byId('metric-alerts').classList.toggle('has-number-errors', numberErrors > 0);
+  setText('nav-anomaly-count', anomalies.length);
+  byId('nav-anomaly-count').classList.toggle('has-number-errors', numberErrors > 0);
+  byId('nav-anomaly-count').hidden = anomalies.length === 0;
   const state = offline ? 'error' : stale ? 'warning' : online ? 'ok' : 'pending';
   byId('sidebar-dot').className = 'status-dot status-' + state;
   setText('sidebar-status', offline || stale ? '部分来源采集异常' : online ? '采集服务运行中' : '等待首次采集');
@@ -274,19 +318,26 @@ function changeView(view, updateHash = true) {
 
 function detailTable(data) {
   const issues = data.anomalies.map(issue => {
-    const [label] = anomalyLabels[issue.type] || ['数据异常'];
-    return '<div><strong>' + escapeText(label) + ' · ' + escapeText(sourceName(issue.sourceId)) + '</strong><span>' +
-      escapeText(issue.detail) + '</span></div>';
+    const [label, color] = anomalyLabel(issue);
+    const numberError = issue.type === 'numbers_mismatch';
+    return '<div class="dialog-alert' + (numberError ? ' dialog-alert-number' : '') + '"><div class="dialog-alert-heading"><strong>' +
+      escapeText(sourceName(issue.sourceId)) + '</strong>' + badge(label, color) + anomalyStatus(issue) + '</div><p>' + escapeText(issue.detail) +
+      '</p>' + (numberError ? compareNumberError(issue) : anomalyComparison(issue)) +
+      compareLine('首次发现', timeMarkup(issue.firstSeenAt)) + '</div>';
   }).join('');
   const official = data.observations.find(source => source.kind === 'official');
   const rows = data.observations.map(source => {
     const sourceIssues = data.anomalies.filter(issue => issue.sourceId === source.sourceId);
-    const comparison = source.kind === 'official' ? badge('官方基准', 'info') : sourceIssues.some(issue => issue.status === 'open')
-      ? badge('待核查', 'warning') : sourceIssues.length ? badge('有异常记录', 'info') : official
-        ? badge('号码一致', 'ok') : badge('待官方', 'pending');
-    const raw = Array.isArray(source.raw) && source.raw.length === 20
-      ? '<details class="section-label"><summary>Keno 原始 20 码</summary>' + escapeText(source.raw.join('、')) + '</details>'
-      : '';
+    const numberIssues = sourceIssues.filter(issue => issue.type === 'numbers_mismatch');
+    const currentNumberIssue = numberIssues.find(issue => issue.status === 'open');
+    let comparison;
+    if (source.kind === 'official') comparison = badge('官方基准', 'info');
+    else if (currentNumberIssue) comparison = badge(anomalyLabel(currentNumberIssue)[0], 'error');
+    else if (numberIssues.length) comparison = badge('开奖错误已恢复', 'error');
+    else if (sourceIssues.some(issue => issue.status === 'open')) comparison = badge('待核查', 'warning');
+    else if (sourceIssues.length) comparison = badge('有异常记录', 'info');
+    else comparison = official ? badge('号码一致', 'ok') : badge('待官方', 'pending');
+    const raw = rawDisclosure(source.raw, 'Keno 原始 20 码');
     const shownTime = source.drawAt ? timeMarkup(source.drawAt) : escapeText(source.timeLabel || emptyValue);
     const timeKind = timeLabels[source.timeKind] || '';
     return '<tr><td>' + escapeText(source.sourceName || source.sourceId) + '</td><td>' +

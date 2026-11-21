@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#101925">
   <meta name="description" content="按期号对照 BCLC Keno 原始开奖和加拿大28数据源，查看近24小时记录及异常。">
   <title>开奖源对账台</title>
-  <link rel="stylesheet" href="/styles.css">
-  <script type="module" src="/dashboard.js"></script>
+  <link rel="stylesheet" href="/styles.css?v=draw-errors">
+  <script type="module" src="/dashboard.js?v=draw-errors"></script>
 </head>
 <body>
   <div class="layout">
@@ -48,7 +48,7 @@
           <div class="metrics">
             <article class="metric"><span>数据源在线</span><strong id="metric-sources">—</strong><small id="metric-source-detail">正在读取采集状态</small></article>
             <article class="metric"><span>已收录期次</span><strong id="metric-draws">—</strong><small id="retention-copy">最近 24 小时</small></article>
-            <article class="metric metric-alert"><span>待核查异常</span><strong id="metric-alerts">—</strong><button type="button" class="text-button" data-view="anomalies">查看异常记录</button></article>
+            <article class="metric metric-alert"><span>近 24 小时开奖错误</span><strong id="metric-alerts">—</strong><small id="metric-alert-open">正在读取异常</small><button type="button" class="text-button" data-view="anomalies">查看异常记录</button></article>
           </div>
         </div>
 
@@ -81,7 +81,7 @@
         <div class="panel-heading"><div><h2>对账异常</h2><p>查看号码、时间、延迟及缺期记录</p></div></div>
         <div class="toolbar anomaly-toolbar">
           <label class="search"><span class="search-icon" aria-hidden="true"></span><input type="search" id="anomaly-query" placeholder="搜索期号或数据源" aria-label="搜索异常记录"></label>
-          <label class="select-label"><select id="anomaly-type" aria-label="异常类型"><option value="all">全部类型</option><option value="numbers_mismatch">号码不一致</option><option value="time_mismatch">开奖时间偏差</option><option value="late_source">来源延迟</option><option value="missing_result">来源缺期</option></select></label>
+          <label class="select-label"><select id="anomaly-type" aria-label="异常类型"><option value="all">全部类型</option><option value="numbers_mismatch">开奖错误（含错期）</option><option value="time_mismatch">开奖时间偏差</option><option value="late_source">来源延迟</option><option value="missing_result">来源缺期</option></select></label>
           <label class="select-label"><select id="anomaly-status" aria-label="处理状态"><option value="all">全部状态</option><option value="open">待核查</option><option value="resolved">已恢复</option></select></label>
         </div>
         <div class="table-wrap">

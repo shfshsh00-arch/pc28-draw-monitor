@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { deriveNumbers, openStore } from '../src/store.js';
 
 const official = { id: 'bclc', name: 'BCLC', kind: 'official', url: 'https://example.com/bclc' };
@@ -25,6 +29,92 @@ test('flags data and timestamp differences separately, then records recovery', t
   store.record([report(source, timestamp + 1000, [{ drawId: 123, numbers: [2, 1, 2], drawAt: toIso(timestamp), timeKind: 'draw' }])], timestamp + 1000);
   assert.equal(store.dashboard(timestamp + 1000).draws[0].matched, 1);
   assert.ok(store.drawDetails(123, timestamp + 1000).anomalies.every(row => row.status === 'resolved'));
+  const issue = store.drawDetails(123, timestamp + 1000).anomalies.find(row => row.type === 'numbers_mismatch');
+  assert.deepEqual(issue.officialNumbers, [2, 1, 2]);
+  assert.deepEqual(issue.sourceNumbers, [9, 8, 1]);
+  assert.equal(store.dashboard(timestamp + 1000).draws[0].numberErrorCount, 1);
+  assert.equal(store.dashboard(timestamp + 1000).draws[0].openNumberErrorCount, 0);
+});
+
+test('finds reused prior raw numbers even when the three digits match, and retains the evidence after correction', t => {
+  const store = openStore(':memory:', [official, source]);
+  t.after(() => store.close());
+  const priorRaw = [...raw.slice(0, -1), 79];
+  store.record([
+    report(official, timestamp, [{ drawId: 120, raw: priorRaw }, { drawId: 123, raw }]),
+    report(source, timestamp, [{ drawId: 123, raw: priorRaw }]),
+  ], timestamp);
+  assert.deepEqual(deriveNumbers(priorRaw), deriveNumbers(raw));
+  assert.equal(store.dashboard(timestamp).draws[0].openNumberErrorCount, 1);
+  store.record([report(source, timestamp + 1, [{ drawId: 123, numbers: [2, 1, 2] }])], timestamp + 1);
+  assert.equal(store.drawDetails(123, timestamp + 1).anomalies[0].status, 'open');
+  store.record([report(source, timestamp + 2, [{ drawId: 123, raw }])], timestamp + 2);
+  const [issue] = store.drawDetails(123, timestamp + 2).anomalies;
+  assert.equal(issue.status, 'resolved');
+  assert.equal(issue.firstSeenAt, toIso(timestamp));
+  assert.deepEqual(issue.evidence, { officialRaw: raw, sourceRaw: priorRaw, rawMismatch: true, priorDrawId: 120, priorMatch: 'raw' });
+});
+
+test('suggests a prior issue only when both its digits and its published time match', t => {
+  const store = openStore(':memory:', [official, source]);
+  t.after(() => store.close());
+  const priorAt = toIso(timestamp - 210000);
+  const before = [2, ...raw.slice(1)];
+  before[1] = 3;
+  const priorNumbers = deriveNumbers(before);
+  store.record([
+    report(official, timestamp, [
+      { drawId: 122, raw: before, drawAt: priorAt, timeKind: 'draw' },
+      { drawId: 123, raw, drawAt: toIso(timestamp), timeKind: 'draw' },
+    ]),
+    report(source, timestamp, [{ drawId: 123, numbers: priorNumbers, drawAt: toIso(timestamp), timeKind: 'draw' }]),
+  ], timestamp);
+  assert.equal(store.drawDetails(123, timestamp).anomalies[0].evidence.priorDrawId, null);
+  store.record([report(source, timestamp + 1, [{ drawId: 123, numbers: priorNumbers, drawAt: priorAt, timeKind: 'draw' }])], timestamp + 1);
+  const issue = store.drawDetails(123, timestamp + 1).anomalies.find(row => row.type === 'numbers_mismatch');
+  assert.equal(issue.evidence.priorDrawId, 122);
+  assert.equal(issue.evidence.priorMatch, 'time_and_numbers');
+});
+
+test('checks earlier source reports when they were corrected before the official result arrived', t => {
+  const store = openStore(':memory:', [official, source]);
+  t.after(() => store.close());
+  const oldTimestamp = toIso(timestamp - 25 * 3600000);
+  store.record([report(official, timestamp, [{ drawId: 122, raw }])], timestamp);
+  store.record([report(source, timestamp + 1, [{ drawId: 123, numbers: [9, 8, 1], drawAt: oldTimestamp, timeKind: 'draw' }])], timestamp + 1);
+  assert.deepEqual(store.drawDetails(123, timestamp + 1).observations[0].numbers, [9, 8, 1]);
+  store.record([report(source, timestamp + 2, [{ drawId: 123, numbers: [2, 1, 2] }])], timestamp + 2);
+  store.record([
+    report(official, timestamp + 3, [{ drawId: 123, raw }]),
+    report(source, timestamp + 3, [{ drawId: 123, numbers: [2, 1, 2] }]),
+  ], timestamp + 3);
+  const [issue] = store.drawDetails(123, timestamp + 3).anomalies;
+  assert.deepEqual(issue.sourceNumbers, [9, 8, 1]);
+  assert.equal(issue.sourceAt, oldTimestamp);
+  assert.equal(issue.status, 'resolved');
+});
+
+test('loads existing anomaly records when opening a database from before raw snapshots', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'draw-monitor-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'monitor.sqlite');
+  const original = openStore(path, [official, source]);
+  original.record([
+    report(official, timestamp, [{ drawId: 123, raw }]),
+    report(source, timestamp, [{ drawId: 123, numbers: [9, 8, 1] }]),
+  ], timestamp);
+  original.close();
+  const legacy = new DatabaseSync(path);
+  legacy.exec('ALTER TABLE anomalies DROP COLUMN evidence');
+  legacy.close();
+  const reopened = openStore(path, [official, source]);
+  try {
+    const [issue] = reopened.drawDetails(123, timestamp).anomalies;
+    assert.deepEqual(issue.sourceNumbers, [9, 8, 1]);
+    assert.equal(issue.evidence, null);
+  } finally {
+    reopened.close();
+  }
 });
 
 test('reports a backward BCLC clock separately from a third-party clock', t => {

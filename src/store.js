@@ -28,6 +28,7 @@ function anomalyView(row) {
     firstSeenAt: timestamps(row.first_seen_at), lastSeenAt: timestamps(row.last_seen_at), detail: row.detail,
     officialNumbers: parseNumbers(row.official_numbers), sourceNumbers: parseNumbers(row.source_numbers),
     officialAt: timestamps(row.official_at), sourceAt: timestamps(row.source_at),
+    evidence: row.evidence ? JSON.parse(row.evidence) : null,
   };
 }
 
@@ -69,10 +70,20 @@ export function openStore(path, sources, options = {}) {
       source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE, type TEXT NOT NULL,
       status TEXT NOT NULL, first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, detail TEXT NOT NULL,
       official_numbers TEXT NOT NULL, source_numbers TEXT, official_at INTEGER, source_at INTEGER,
+      evidence TEXT,
       PRIMARY KEY(draw_id, source_id, type)
     );
     CREATE INDEX IF NOT EXISTS anomalies_latest ON anomalies(status, draw_id DESC);
+    CREATE TABLE IF NOT EXISTS pending_number_evidence (
+      draw_id INTEGER NOT NULL REFERENCES draws(id) ON DELETE CASCADE,
+      source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+      numbers TEXT NOT NULL, raw TEXT, draw_at INTEGER, time_kind TEXT, precision_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS pending_number_evidence_by_draw ON pending_number_evidence(draw_id);
   `);
+  if (!db.prepare('PRAGMA table_info(anomalies)').all().some(column => column.name === 'evidence')) {
+    db.exec('ALTER TABLE anomalies ADD COLUMN evidence TEXT');
+  }
 
   const byId = new Map(sources.map(source => [source.id, source]));
   const officialId = sources.find(source => source.kind === 'official')?.id;
@@ -101,17 +112,32 @@ export function openStore(path, sources, options = {}) {
   const latestObservation = db.prepare(`SELECT o.draw_id, o.draw_at FROM observations o JOIN draws d ON d.id=o.draw_id
     WHERE o.source_id=? AND d.retention_at>? ORDER BY o.draw_id DESC LIMIT 1`);
   const observationAt = db.prepare('SELECT * FROM observations WHERE draw_id=? AND source_id=?');
+  const rememberReplacedNumbers = db.prepare(`INSERT INTO pending_number_evidence
+    SELECT draw_id, source_id, numbers, raw, draw_at, time_kind, precision_ms FROM observations
+    WHERE draw_id=? AND source_id=? AND (numbers<>? OR raw IS NOT ?)
+      AND (? OR NOT EXISTS (SELECT 1 FROM observations WHERE draw_id=? AND source_id=?))`);
+  const pendingNumberEvidence = db.prepare('SELECT * FROM pending_number_evidence WHERE draw_id=? ORDER BY rowid');
+  const clearPendingNumberEvidence = db.prepare('DELETE FROM pending_number_evidence WHERE draw_id=?');
+  const earlierOfficialRaw = db.prepare(`SELECT draw_id FROM observations
+    WHERE source_id=? AND draw_id<? AND raw=? ORDER BY draw_id DESC LIMIT 1`);
+  const earlierOfficialTimeAndNumbers = db.prepare(`SELECT draw_id FROM observations
+    WHERE source_id=? AND draw_id<? AND numbers=? AND time_kind='draw' AND draw_at BETWEEN ? AND ?
+    ORDER BY ABS(draw_at - ?), draw_id DESC LIMIT 1`);
   const rowsForDraw = db.prepare(`SELECT observations.*, sources.name, sources.kind FROM observations
     JOIN sources ON sources.id = observations.source_id WHERE draw_id=? ORDER BY (kind='official') DESC, sources.rowid`);
   const currentAnomalies = db.prepare('SELECT * FROM anomalies WHERE draw_id=? ORDER BY status, type, source_id');
   const examineDraws = db.prepare(`SELECT draws.id FROM draws INNER JOIN observations AS baseline
     ON baseline.draw_id=draws.id AND baseline.source_id=? WHERE draws.retention_at > ?`);
-  const upsertAnomaly = db.prepare(`INSERT INTO anomalies VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  const upsertAnomaly = db.prepare(`INSERT INTO anomalies (draw_id, source_id, type, status, first_seen_at, last_seen_at,
+    detail, official_numbers, source_numbers, official_at, source_at, evidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(draw_id, source_id, type) DO UPDATE SET status=excluded.status, last_seen_at=excluded.last_seen_at,
       detail=excluded.detail, official_numbers=excluded.official_numbers, source_numbers=excluded.source_numbers,
-      official_at=excluded.official_at, source_at=excluded.source_at
+      official_at=excluded.official_at, source_at=excluded.source_at, evidence=excluded.evidence
       WHERE excluded.status='open' OR anomalies.status<>excluded.status OR anomalies.detail<>excluded.detail`);
   const resolveAnomaly = db.prepare(`UPDATE anomalies SET status='resolved', last_seen_at=? WHERE draw_id=? AND source_id=? AND type=? AND status='open'`);
+  const resolveNumberError = db.prepare(`UPDATE anomalies SET status='resolved', last_seen_at=?
+    WHERE draw_id=? AND source_id=? AND type='numbers_mismatch' AND status='open'
+      AND (? OR COALESCE(json_extract(evidence, '$.rawMismatch'), 0)=0)`);
   const retiredThrough = db.prepare('SELECT retired_through FROM retention_state WHERE id=1');
   const markRetired = db.prepare('UPDATE retention_state SET retired_through=MAX(retired_through, ?) WHERE id=1');
   const retiringNow = db.prepare(`SELECT MAX(d.id) AS id FROM draws d JOIN observations o ON o.draw_id=d.id
@@ -125,21 +151,50 @@ export function openStore(path, sources, options = {}) {
     CASE WHEN o.numbers IS NULL THEN 0 ELSE (SELECT COUNT(*) FROM observations a
       WHERE a.draw_id=d.id AND a.source_id<>? AND a.numbers=o.numbers
        AND (a.raw IS NULL OR o.raw IS NULL OR a.raw=o.raw)) END AS matched,
-    (SELECT COUNT(*) FROM anomalies f WHERE f.draw_id=d.id) AS anomaly_count
+    (SELECT COUNT(*) FROM anomalies f WHERE f.draw_id=d.id) AS anomaly_count,
+    (SELECT COUNT(*) FROM anomalies f WHERE f.draw_id=d.id AND f.type='numbers_mismatch') AS number_error_count,
+    (SELECT COUNT(*) FROM anomalies f WHERE f.draw_id=d.id AND f.type='numbers_mismatch' AND f.status='open') AS open_number_error_count
     FROM draws d LEFT JOIN observations o ON d.id=o.draw_id AND o.source_id=?
     WHERE d.retention_at>? ORDER BY d.id DESC`);
   const listAnomalies = db.prepare(`SELECT a.* FROM anomalies a JOIN draws d ON d.id=a.draw_id
     WHERE d.retention_at>? ORDER BY (a.status='open') DESC, a.draw_id DESC, a.last_seen_at DESC`);
 
-  function setAnomaly(drawId, sourceId, type, detail, official, observation, now, status = 'open') {
+  function setAnomaly(drawId, sourceId, type, detail, official, observation, now, status = 'open', evidence = null) {
     upsertAnomaly.run(drawId, sourceId, type, status, now, now, detail, official.numbers,
-      observation?.numbers ?? null, official.draw_at, observation?.draw_at ?? null);
+      observation?.numbers ?? null, official.draw_at, observation?.draw_at ?? null, evidence);
+  }
+
+  function flagNumberError(official, observed, now) {
+    const wrongNumbers = observed.numbers !== official.numbers;
+    const rawMismatch = Boolean(observed.raw && observed.raw !== official.raw);
+    if (!wrongNumbers && !rawMismatch) return false;
+
+    let priorDrawId = null;
+    let priorMatch = null;
+    if (rawMismatch) {
+      priorDrawId = earlierOfficialRaw.get(officialId, official.draw_id, observed.raw)?.draw_id ?? null;
+      if (priorDrawId !== null) priorMatch = 'raw';
+    } else if (observed.time_kind === 'draw' && observed.draw_at !== null && official.draw_at !== null &&
+        Math.abs(observed.draw_at - official.draw_at) > timeTolerance) {
+      const margin = Math.max(1000, observed.precision_ms);
+      priorDrawId = earlierOfficialTimeAndNumbers.get(officialId, official.draw_id, observed.numbers,
+        observed.draw_at - margin, observed.draw_at + margin, observed.draw_at)?.draw_id ?? null;
+      if (priorDrawId !== null) priorMatch = 'time_and_numbers';
+    }
+    const detail = wrongNumbers ? '同一期三位数与 BCLC 原始号码复算结果不同。' : '三位数相同，但来源提供的 Keno 20 码与 BCLC 不同。';
+    const evidence = JSON.stringify({
+      officialRaw: parseNumbers(official.raw), sourceRaw: parseNumbers(observed.raw), rawMismatch, priorDrawId, priorMatch,
+    });
+    setAnomaly(official.draw_id, observed.source_id, 'numbers_mismatch', detail, official, observed, now, 'open', evidence);
+    return true;
   }
 
   function reconcile(drawId, activeSources, now) {
     const observations = new Map(rowsForDraw.all(drawId).map(row => [row.source_id, row]));
     const official = observations.get(officialId);
     if (!official) return;
+    for (const replaced of pendingNumberEvidence.all(drawId)) flagNumberError(official, replaced, now);
+    clearPendingNumberEvidence.run(drawId);
     const previous = observationAt.get(drawId - 1, officialId);
     const officialClockReversed = official.time_kind === 'draw' && previous?.time_kind === 'draw' &&
       official.draw_at !== null && previous.draw_at !== null && official.draw_at < previous.draw_at;
@@ -161,10 +216,9 @@ export function openStore(path, sources, options = {}) {
       }
 
       resolveAnomaly.run(now, drawId, source.id, 'missing_result');
-      if (observed.numbers !== official.numbers || (observed.raw && observed.raw !== official.raw)) {
-        const detail = observed.numbers !== official.numbers ? '同一期三位数与 BCLC 原始号码复算结果不同。' : '三位数相同，但来源提供的 Keno 20 码与 BCLC 不同。';
-        setAnomaly(drawId, source.id, 'numbers_mismatch', detail, official, observed, now);
-      } else resolveAnomaly.run(now, drawId, source.id, 'numbers_mismatch');
+      if (!flagNumberError(official, observed, now)) {
+        resolveNumberError.run(now, drawId, source.id, Number(Boolean(observed.raw)));
+      }
 
       if (!officialClockReversed && official.time_kind === 'draw' && ['draw', 'clock'].includes(observed.time_kind) &&
           official.draw_at !== null && observed.draw_at !== null) {
@@ -193,6 +247,8 @@ export function openStore(path, sources, options = {}) {
     db.exec('BEGIN');
     try {
       const affected = new Set();
+      const newBaselines = new Set();
+      let latestOfficialId = latestObservation.get(officialId, cutoff)?.draw_id;
       let retired = Math.max(retiredThrough.get().retired_through, retiringNow.get(officialId, cutoff).id ?? 0);
       const ordered = [...outcomes].sort((a, b) => Number(b.sourceId === officialId) - Number(a.sourceId === officialId));
       for (const outcome of ordered) {
@@ -218,13 +274,22 @@ export function openStore(path, sources, options = {}) {
               updateRetention.run(drawAt, row.drawId);
               continue;
             }
-            if (!getDraw.get(row.drawId)) continue;
+            if (!getDraw.get(row.drawId) && row.drawId !== latestOfficialId + 1) continue;
           }
           if (row.drawId <= retired) continue;
-          const retentionAt = drawAt !== null && drawAt <= seenAt ? drawAt : seenAt;
+          const retentionAt = drawAt !== null && drawAt > cutoff && drawAt <= seenAt ? drawAt : seenAt;
+          const numbersJson = JSON.stringify(numbers);
+          const rawJson = raw ? JSON.stringify(raw) : null;
           addDraw.run(row.drawId, seenAt, retentionAt);
-          if (source.kind === 'official') updateRetention.run(retentionAt, row.drawId);
-          saveObservation.run(row.drawId, source.id, JSON.stringify(numbers), raw ? JSON.stringify(raw) : null,
+          if (source.kind === 'official') {
+            if (!observationAt.get(row.drawId, officialId)) newBaselines.add(row.drawId);
+            latestOfficialId = Math.max(latestOfficialId ?? 0, row.drawId);
+            updateRetention.run(retentionAt, row.drawId);
+          } else {
+            rememberReplacedNumbers.run(row.drawId, source.id, numbersJson, rawJson,
+              Number(newBaselines.has(row.drawId)), row.drawId, officialId);
+          }
+          saveObservation.run(row.drawId, source.id, numbersJson, rawJson,
             drawAt, typeof row.timeLabel === 'string' ? row.timeLabel.slice(0, 64) : null, row.timeKind ?? null,
             Number.isFinite(row.precisionMs) ? Math.max(0, row.precisionMs) : 0, seenAt, seenAt);
           affected.add(row.drawId);
@@ -262,6 +327,7 @@ export function openStore(path, sources, options = {}) {
         draws: listDraws.all(officialId, officialId, officialId, cutoff).map(row => ({
           drawId: row.id, officialAt: timestamps(row.draw_at), officialNumbers: parseNumbers(row.numbers),
           firstSeenAt: timestamps(row.first_seen_at), total: row.total, matched: row.matched, anomalyCount: row.anomaly_count,
+          numberErrorCount: row.number_error_count, openNumberErrorCount: row.open_number_error_count,
         })),
         anomalies: listAnomalies.all(cutoff).map(anomalyView),
       };
