@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101925">
+  <meta name="description" content="按期号对照 BCLC Keno 原始开奖和加拿大28数据源，查看近24小时记录及异常。">
+  <title>开奖源对账台</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/dashboard.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="开奖源对账台首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>开奖源对账台</strong><small>加拿大28 · BCLC Keno</small></span>
+      </a>
+      <nav class="navigation" aria-label="页面导航">
+        <button type="button" data-view="overview" aria-current="page"><i class="nav-icon icon-grid" aria-hidden="true"></i>监控总览</button>
+        <button type="button" data-view="anomalies"><i class="nav-icon icon-alert" aria-hidden="true">!</i>异常记录 <span id="nav-anomaly-count" class="nav-count" hidden>0</span></button>
+        <button type="button" data-view="sources"><i class="nav-icon icon-source" aria-hidden="true"></i>数据源</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot status-pending" id="sidebar-dot"></span>
+        <div><strong id="sidebar-status">正在读取</strong><small id="sidebar-cadence">数据按期号核对</small></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="masthead">
+        <div><p class="eyebrow">加拿大28 / 数据监控</p><h1 id="view-title">监控总览</h1></div>
+        <div class="header-actions">
+          <div class="update-label"><small>最近刷新 · 北京时间</small><span id="last-update">—</span></div>
+          <button type="button" class="button button-refresh" id="refresh-button"><span aria-hidden="true">⟳</span> 刷新</button>
+        </div>
+      </header>
+      <div class="notice" id="notice" role="status" hidden></div>
+
+      <section id="view-overview" aria-label="监控总览">
+        <div class="summary">
+          <section class="official-card" aria-labelledby="official-title">
+            <div class="official-heading"><h2 id="official-title">BCLC Keno</h2><span class="pill pill-official">官方基准</span></div>
+            <div class="official-draw"><span>最新期号</span><strong id="reference-draw">—</strong></div>
+            <div id="reference-numbers" class="numbers reference-numbers" aria-label="官方开奖号码">等待官方数据</div>
+            <p class="official-foot"><span>开奖时间</span> <time id="reference-time">—</time></p>
+          </section>
+          <div class="metrics">
+            <article class="metric"><span>数据源在线</span><strong id="metric-sources">—</strong><small id="metric-source-detail">正在读取采集状态</small></article>
+            <article class="metric"><span>已收录期次</span><strong id="metric-draws">—</strong><small id="retention-copy">最近 24 小时</small></article>
+            <article class="metric metric-alert"><span>待核查异常</span><strong id="metric-alerts">—</strong><button type="button" class="text-button" data-view="anomalies">查看异常记录</button></article>
+          </div>
+        </div>
+
+        <div class="board-grid">
+          <section class="panel draw-panel" aria-labelledby="draw-list-title">
+            <div class="panel-heading"><div><h2 id="draw-list-title">期号对账</h2><p>按同一期号比对官方号码和各来源结果</p></div><span class="pill">近 24 小时</span></div>
+            <div class="toolbar">
+              <label class="search"><span class="search-icon" aria-hidden="true"></span><input type="search" id="draw-query" placeholder="搜索期号" aria-label="搜索期号" inputmode="numeric"></label>
+              <label class="select-label"><select id="draw-filter" aria-label="对账状态"><option value="all">全部状态</option><option value="anomaly">有异常</option><option value="pending">待对账</option><option value="matched">号码一致</option></select></label>
+            </div>
+            <div class="table-wrap">
+              <table class="table" aria-labelledby="draw-list-title">
+                <thead><tr><th scope="col">期号</th><th scope="col">官方开奖</th><th scope="col">官方时间</th><th scope="col">号码一致 / 已采集</th><th scope="col">状态</th></tr></thead>
+                <tbody id="draw-rows"></tbody>
+              </table>
+              <div class="empty" id="draw-empty"><i class="empty-icon" aria-hidden="true"></i><strong>正在读取对账记录</strong><span>新一期采集后会自动出现在这里。</span></div>
+            </div>
+            <div class="pagination" id="draw-pages" hidden><span id="draw-page-label"></span><div><button type="button" class="button button-small" id="draw-prev">上一页</button><button type="button" class="button button-small" id="draw-next">下一页</button></div></div>
+          </section>
+          <section class="panel source-panel" aria-labelledby="source-preview-title">
+            <div class="panel-heading"><div><h2 id="source-preview-title">数据源状态</h2><p>最近一次采集情况</p></div></div>
+            <div id="source-preview" class="source-preview"></div>
+            <div id="source-preview-empty" class="empty empty-compact"><strong>等待读取数据源</strong></div>
+            <div class="source-footer"><button type="button" class="text-button" data-view="sources">查看全部数据源</button></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-anomalies" class="panel secondary-panel" aria-label="异常记录" hidden>
+        <div class="panel-heading"><div><h2>对账异常</h2><p>查看号码、时间、延迟及缺期记录</p></div></div>
+        <div class="toolbar anomaly-toolbar">
+          <label class="search"><span class="search-icon" aria-hidden="true"></span><input type="search" id="anomaly-query" placeholder="搜索期号或数据源" aria-label="搜索异常记录"></label>
+          <label class="select-label"><select id="anomaly-type" aria-label="异常类型"><option value="all">全部类型</option><option value="numbers_mismatch">号码不一致</option><option value="time_mismatch">开奖时间偏差</option><option value="late_source">来源延迟</option><option value="missing_result">来源缺期</option></select></label>
+          <label class="select-label"><select id="anomaly-status" aria-label="处理状态"><option value="all">全部状态</option><option value="open">待核查</option><option value="resolved">已恢复</option></select></label>
+        </div>
+        <div class="table-wrap">
+          <table class="table anomaly-table" aria-label="异常列表">
+            <thead><tr><th scope="col">期号</th><th scope="col">数据源</th><th scope="col">异常</th><th scope="col">对照</th><th scope="col">首次发现</th><th scope="col">状态</th></tr></thead>
+            <tbody id="anomaly-rows"></tbody>
+          </table>
+          <div class="empty" id="anomaly-empty"><i class="empty-icon" aria-hidden="true"></i><strong>正在读取异常记录</strong></div>
+        </div>
+        <div class="pagination" id="anomaly-pages" hidden><span id="anomaly-page-label"></span><div><button type="button" class="button button-small" id="anomaly-prev">上一页</button><button type="button" class="button button-small" id="anomaly-next">下一页</button></div></div>
+      </section>
+
+      <section id="view-sources" class="panel secondary-panel" aria-label="数据源" hidden>
+        <div class="panel-heading"><div><h2>采集状态</h2><p>采集失败会显示最近的错误</p></div><span class="pill" id="source-count-label">—</span></div>
+        <div class="table-wrap">
+          <table class="table source-table" aria-label="来源列表">
+            <thead><tr><th scope="col">数据源</th><th scope="col">状态</th><th scope="col">最新期号</th><th scope="col">最近成功</th><th scope="col">采集说明</th></tr></thead>
+            <tbody id="source-rows"></tbody>
+          </table>
+          <div class="empty" id="source-empty"><i class="empty-icon" aria-hidden="true"></i><strong>正在读取数据源</strong></div>
+        </div>
+      </section>
+
+      <footer class="workspace-footer"><span>开奖源对账台</span><span>所有时间以北京时间显示</span></footer>
+    </main>
+  </div>
+
+  <dialog id="draw-dialog" class="draw-dialog" aria-labelledby="detail-title">
+    <div class="dialog-header"><div><p class="eyebrow">逐源对照</p><h2 id="detail-title">期号详情</h2></div><button type="button" class="button dialog-close" id="detail-close" aria-label="关闭详情">×</button></div>
+    <div class="dialog-content" id="detail-content" aria-live="polite"></div>
+  </dialog>
+</body>
+</html>
